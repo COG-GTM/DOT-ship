@@ -4,7 +4,7 @@ import { pool } from '../db/client.js';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { mkdir, writeFile, unlink } from 'fs/promises';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { authMiddleware } from '../middleware/auth.js';
 
@@ -16,6 +16,18 @@ const UPLOADS_DIR = join(__dirname, '../../uploads');
 
 // UUID validation regex - prevents path traversal by ensuring ID is valid UUID
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * SECURITY: Resolve a file path and verify it stays within the allowed base directory.
+ * Prevents path traversal attacks by rejecting paths that escape the uploads directory.
+ */
+function safeFilePath(baseDir: string, untrustedPath: string): string {
+  const resolved = resolve(baseDir, untrustedPath);
+  if (!resolved.startsWith(baseDir + '/') && resolved !== baseDir) {
+    throw new Error('Path traversal detected');
+  }
+  return resolved;
+}
 
 function isValidUUID(id: string | string[] | undefined): boolean {
   if (!id || Array.isArray(id)) return false;
@@ -173,7 +185,8 @@ filesRouter.post('/:id/local-upload', rawBodyParser, authMiddleware, async (req:
     }
 
     // Ensure uploads directory exists
-    const filePath = join(UPLOADS_DIR, file.s3_key);
+    // SECURITY: Validate resolved path stays within UPLOADS_DIR to prevent path traversal
+    const filePath = safeFilePath(UPLOADS_DIR, file.s3_key);
     await mkdir(dirname(filePath), { recursive: true });
 
     // Write file
@@ -280,7 +293,8 @@ filesRouter.get('/:id/serve', authMiddleware, async (req: Request, res: Response
     }
 
     const file = fileResult.rows[0];
-    const filePath = join(UPLOADS_DIR, file.s3_key);
+    // SECURITY: Validate resolved path stays within UPLOADS_DIR to prevent path traversal
+    const filePath = safeFilePath(UPLOADS_DIR, file.s3_key);
 
     // Set content type and serve file
     res.setHeader('Content-Type', file.mime_type);
@@ -357,7 +371,8 @@ filesRouter.delete('/:id', authMiddleware, async (req: Request, res: Response) =
       // TODO: Delete from S3
     } else {
       try {
-        const filePath = join(UPLOADS_DIR, file.s3_key);
+        // SECURITY: Validate resolved path stays within UPLOADS_DIR to prevent path traversal
+        const filePath = safeFilePath(UPLOADS_DIR, file.s3_key);
         await unlink(filePath);
       } catch {
         // File might not exist, ignore error
