@@ -124,15 +124,11 @@ router.post('/:id/links', authMiddleware, async (req: Request, res: Response) =>
 
       // Insert new links (if any)
       if (target_ids.length > 0) {
-        const values = target_ids.map((targetId, idx) =>
-          `($1, $${idx + 2})`
-        ).join(', ');
-
         await client.query(
           `INSERT INTO document_links (source_id, target_id)
-           VALUES ${values}
+           SELECT $1, unnest($2::uuid[])
            ON CONFLICT (source_id, target_id) DO NOTHING`,
-          [id, ...target_ids]
+          [id, target_ids]
         );
       }
 
