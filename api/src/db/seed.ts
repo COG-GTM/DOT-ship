@@ -76,7 +76,8 @@ async function seed() {
       { email: 'jack.brown@ship.local', name: 'Jack Brown' },
     ];
 
-    const passwordHash = await bcrypt.hash('admin123', 10);
+    const seedPassword = process.env.SEED_USER_PASSWORD || 'admin123';
+    const passwordHash = await bcrypt.hash(seedPassword, 10);
     let usersCreated = 0;
 
     for (const member of teamMembers) {

@@ -10,7 +10,7 @@ import { api, UserInfo, Workspace } from '@/lib/api';
 import { useWorkspace, WorkspaceWithRole } from '@/contexts/WorkspaceContext';
 
 // Cache key for offline auth
-const AUTH_CACHE_KEY = 'ship:auth-cache';
+const AUTH_CACHE_KEY = import.meta.env.VITE_AUTH_CACHE_KEY || 'ship:auth-cache';
 
 interface CachedAuth {
   user: UserInfo;

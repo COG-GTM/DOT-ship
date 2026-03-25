@@ -31,12 +31,11 @@ import dashboardRoutes from './routes/dashboard.js';
 import { setupSwagger } from './swagger.js';
 import { initializeCAIA } from './services/caia.js';
 
-// Validate SESSION_SECRET in production
-if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
-  throw new Error('SESSION_SECRET environment variable is required in production');
+// Validate SESSION_SECRET is set (required in all environments)
+if (!process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET environment variable is required. Set it in your .env.local file.');
 }
-
-const sessionSecret = process.env.SESSION_SECRET || 'dev-only-secret-do-not-use-in-production';
+const sessionSecret: string = process.env.SESSION_SECRET;
 
 // CSRF protection setup
 const { csrfSynchronisedProtection, generateToken } = csrfSync({

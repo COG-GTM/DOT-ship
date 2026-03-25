@@ -134,6 +134,7 @@ export const test = base.extend<
           ...process.env,
           PORT: String(port),
           DATABASE_URL: dbUrl,
+          SESSION_SECRET: process.env.SESSION_SECRET || 'test-session-secret',
           CORS_ORIGIN: '*', // Allow any origin during tests
           NODE_ENV: 'test',
           // Prevent dotenv from overriding our DATABASE_URL
@@ -309,8 +310,9 @@ async function runMigrations(dbUrl: string): Promise<void> {
  * - Issues with various states
  */
 async function seedMinimalTestData(pool: Pool): Promise<void> {
-  // Hash the test password
-  const passwordHash = await bcrypt.hash('admin123', 10);
+  // Hash the test password (uses env var with test default)
+  const testPassword = process.env.TEST_USER_PASSWORD || 'admin123';
+  const passwordHash = await bcrypt.hash(testPassword, 10);
 
   // Create workspace with sprint_start_date 3 months ago (matches full seed)
   const threeMonthsAgo = new Date();
