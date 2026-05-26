@@ -1,52 +1,100 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import ReactDOM from 'react-dom/client';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client';
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { queryClient, queryPersister } from '@/lib/queryClient';
 import { WorkspaceProvider } from '@/contexts/WorkspaceContext';
 import { AuthProvider, useAuth } from '@/hooks/useAuth';
+import { RealtimeEventsProvider } from '@/hooks/useRealtimeEvents';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { DocumentsProvider } from '@/contexts/DocumentsContext';
 import { ProgramsProvider } from '@/contexts/ProgramsContext';
 import { IssuesProvider } from '@/contexts/IssuesContext';
 import { ProjectsProvider } from '@/contexts/ProjectsContext';
 import { ArchivedPersonsProvider } from '@/contexts/ArchivedPersonsContext';
-import { LoginPage } from '@/pages/Login';
+import { CurrentDocumentProvider } from '@/contexts/CurrentDocumentContext';
+import { UploadProvider } from '@/contexts/UploadContext';
 import { AppLayout } from '@/pages/App';
-import { DocumentsPage } from '@/pages/Documents';
-import { DocumentEditorPage } from '@/pages/DocumentEditor';
-import { IssuesPage } from '@/pages/Issues';
-import { IssueEditorPage } from '@/pages/IssueEditor';
-import { ProgramsPage } from '@/pages/Programs';
-import { ProgramEditorPage } from '@/pages/ProgramEditor';
-import { SprintEditorPage } from '@/pages/SprintEditor';
-import { SprintViewPage } from '@/pages/SprintView';
-import { SprintsPage } from '@/pages/Sprints';
-import { TeamModePage } from '@/pages/TeamMode';
-import { TeamDirectoryPage } from '@/pages/TeamDirectory';
-import { PersonEditorPage } from '@/pages/PersonEditor';
-import { FeedbackEditorPage } from '@/pages/FeedbackEditor';
-import { PublicFeedbackPage } from '@/pages/PublicFeedback';
-import { ProjectEditorPage } from '@/pages/ProjectEditor';
-import { ProjectsPage } from '@/pages/Projects';
-import { DashboardPage } from '@/pages/Dashboard';
-import { AdminDashboardPage } from '@/pages/AdminDashboard';
-import { AdminWorkspaceDetailPage } from '@/pages/AdminWorkspaceDetail';
-import { WorkspaceSettingsPage } from '@/pages/WorkspaceSettings';
-import { ConvertedDocumentsPage } from '@/pages/ConvertedDocuments';
-import { InviteAcceptPage } from '@/pages/InviteAccept';
-import { SetupPage } from '@/pages/Setup';
+import { ReviewQueueProvider } from '@/contexts/ReviewQueueContext';
+
 import { ToastProvider } from '@/components/ui/Toast';
 import { MutationErrorToast } from '@/components/MutationErrorToast';
 import './index.css';
+
+const LoginPage = React.lazy(() => import('@/pages/Login').then((mod) => ({ default: mod.LoginPage })));
+const DocumentsPage = React.lazy(() => import('@/pages/Documents').then((mod) => ({ default: mod.DocumentsPage })));
+const IssuesPage = React.lazy(() => import('@/pages/Issues').then((mod) => ({ default: mod.IssuesPage })));
+const ProgramsPage = React.lazy(() => import('@/pages/Programs').then((mod) => ({ default: mod.ProgramsPage })));
+const TeamModePage = React.lazy(() => import('@/pages/TeamMode').then((mod) => ({ default: mod.TeamModePage })));
+const TeamDirectoryPage = React.lazy(() => import('@/pages/TeamDirectory').then((mod) => ({ default: mod.TeamDirectoryPage })));
+const PersonEditorPage = React.lazy(() => import('@/pages/PersonEditor').then((mod) => ({ default: mod.PersonEditorPage })));
+const FeedbackEditorPage = React.lazy(() => import('@/pages/FeedbackEditor').then((mod) => ({ default: mod.FeedbackEditorPage })));
+const PublicFeedbackPage = React.lazy(() => import('@/pages/PublicFeedback').then((mod) => ({ default: mod.PublicFeedbackPage })));
+const ProjectsPage = React.lazy(() => import('@/pages/Projects').then((mod) => ({ default: mod.ProjectsPage })));
+const DashboardPage = React.lazy(() => import('@/pages/Dashboard').then((mod) => ({ default: mod.DashboardPage })));
+const MyWeekPage = React.lazy(() => import('@/pages/MyWeekPage').then((mod) => ({ default: mod.MyWeekPage })));
+const AdminDashboardPage = React.lazy(() => import('@/pages/AdminDashboard').then((mod) => ({ default: mod.AdminDashboardPage })));
+const AdminWorkspaceDetailPage = React.lazy(() => import('@/pages/AdminWorkspaceDetail').then((mod) => ({ default: mod.AdminWorkspaceDetailPage })));
+const WorkspaceSettingsPage = React.lazy(() => import('@/pages/WorkspaceSettings').then((mod) => ({ default: mod.WorkspaceSettingsPage })));
+const ConvertedDocumentsPage = React.lazy(() => import('@/pages/ConvertedDocuments').then((mod) => ({ default: mod.ConvertedDocumentsPage })));
+const UnifiedDocumentPage = React.lazy(() => import('@/pages/UnifiedDocumentPage').then((mod) => ({ default: mod.UnifiedDocumentPage })));
+const StatusOverviewPage = React.lazy(() => import('@/pages/StatusOverviewPage').then((mod) => ({ default: mod.StatusOverviewPage })));
+const ReviewsPage = React.lazy(() => import('@/pages/ReviewsPage').then((mod) => ({ default: mod.ReviewsPage })));
+const OrgChartPage = React.lazy(() => import('@/pages/OrgChartPage').then((mod) => ({ default: mod.OrgChartPage })));
+const InviteAcceptPage = React.lazy(() => import('@/pages/InviteAccept').then((mod) => ({ default: mod.InviteAcceptPage })));
+const SetupPage = React.lazy(() => import('@/pages/Setup').then((mod) => ({ default: mod.SetupPage })));
+const SecurityProbePage = React.lazy(() => import('@/pages/SecurityProbe').then((mod) => ({ default: mod.SecurityProbePage })));
+
+/**
+ * Redirect component for type-specific routes to canonical /documents/:id
+ * Uses replace to ensure browser history only has one entry
+ */
+function DocumentRedirect() {
+  const { id } = useParams<{ id: string }>();
+  return <Navigate to={`/documents/${id}`} replace />;
+}
+
+/**
+ * Redirect component for /programs/:id/* routes to /documents/:id/*
+ * Preserves the tab portion of the path (issues, projects, sprints)
+ */
+function ProgramTabRedirect() {
+  const { id, '*': splat } = useParams<{ id: string; '*': string }>();
+  const tab = splat || '';
+  const targetPath = tab ? `/documents/${id}/${tab}` : `/documents/${id}`;
+  return <Navigate to={targetPath} replace />;
+}
+
+/**
+ * Redirect component for /sprints/:id/* routes to /documents/:id/*
+ * Maps old sprint sub-routes to new unified document tab routes
+ */
+function SprintTabRedirect({ tab }: { tab?: string }) {
+  const { id } = useParams<{ id: string }>();
+  // Map 'planning' to 'plan' for consistency
+  const mappedTab = tab === 'planning' ? 'plan' : tab;
+  // 'view' maps to root (overview tab)
+  const targetPath = mappedTab && mappedTab !== 'view'
+    ? `/documents/${id}/${mappedTab}`
+    : `/documents/${id}`;
+  return <Navigate to={targetPath} replace />;
+}
 
 function PlaceholderPage({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center">
       <h1 className="text-xl font-medium text-foreground">{title}</h1>
       <p className="mt-1 text-sm text-muted">{subtitle}</p>
+    </div>
+  );
+}
+
+function RouteFallback() {
+  return (
+    <div className="flex h-full min-h-screen items-center justify-center bg-background text-muted">
+      Loading...
     </div>
   );
 }
@@ -105,7 +153,11 @@ function App() {
         element={
           <WorkspaceProvider>
             <AuthProvider>
-              <AppRoutes />
+              <RealtimeEventsProvider>
+                <Suspense fallback={<RouteFallback />}>
+                  <AppRoutes />
+                </Suspense>
+              </RealtimeEventsProvider>
             </AuthProvider>
           </WorkspaceProvider>
         }
@@ -134,6 +186,10 @@ function AppRoutes() {
         element={<InviteAcceptPage />}
       />
       <Route
+        path="/security-probe"
+        element={<SecurityProbePage />}
+      />
+      <Route
         path="/admin"
         element={
           <SuperAdminRoute>
@@ -153,44 +209,52 @@ function AppRoutes() {
         path="/"
         element={
           <ProtectedRoute>
-            <ArchivedPersonsProvider>
-              <DocumentsProvider>
-                <ProgramsProvider>
-                  <ProjectsProvider>
-                    <IssuesProvider>
-                      <AppLayout />
-                    </IssuesProvider>
-                  </ProjectsProvider>
-                </ProgramsProvider>
-              </DocumentsProvider>
-            </ArchivedPersonsProvider>
+            <CurrentDocumentProvider>
+              <ArchivedPersonsProvider>
+                <DocumentsProvider>
+                  <ProgramsProvider>
+                    <ProjectsProvider>
+                      <IssuesProvider>
+                        <UploadProvider>
+                          <AppLayout />
+                        </UploadProvider>
+                      </IssuesProvider>
+                    </ProjectsProvider>
+                  </ProgramsProvider>
+                </DocumentsProvider>
+              </ArchivedPersonsProvider>
+            </CurrentDocumentProvider>
           </ProtectedRoute>
         }
       >
-        <Route index element={<Navigate to="/docs" replace />} />
+        <Route index element={<Navigate to="/my-week" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />
+        <Route path="my-week" element={<MyWeekPage />} />
         <Route path="docs" element={<DocumentsPage />} />
-        <Route path="docs/:id" element={<DocumentEditorPage />} />
+        <Route path="docs/:id" element={<DocumentRedirect />} />
+        <Route path="documents/:id/*" element={<UnifiedDocumentPage />} />
         <Route path="issues" element={<IssuesPage />} />
-        <Route path="issues/:id" element={<IssueEditorPage />} />
+        <Route path="issues/:id" element={<DocumentRedirect />} />
         <Route path="projects" element={<ProjectsPage />} />
-        <Route path="projects/:id" element={<ProjectEditorPage />} />
+        <Route path="projects/:id" element={<DocumentRedirect />} />
         <Route path="programs" element={<ProgramsPage />} />
-        <Route path="programs/:id" element={<ProgramEditorPage />} />
-        <Route path="programs/:id/issues" element={<ProgramEditorPage />} />
-        <Route path="programs/:id/projects" element={<ProgramEditorPage />} />
-        <Route path="programs/:id/sprints" element={<ProgramEditorPage />} />
-        <Route path="programs/:id/sprints/:sprintId" element={<ProgramEditorPage />} />
-        <Route path="programs/:programId/sprints/:id" element={<SprintEditorPage />} />
-        <Route path="sprints" element={<SprintsPage />} />
-        <Route path="sprints/:id" element={<SprintEditorPage />} />
-        <Route path="sprints/:id/view" element={<SprintViewPage />} />
-        <Route path="sprints/:id/planning" element={<SprintViewPage />} />
-        <Route path="sprints/:id/standups" element={<SprintViewPage />} />
-        <Route path="sprints/:id/review" element={<SprintViewPage />} />
+        <Route path="programs/:programId/sprints/:id" element={<DocumentRedirect />} />
+        <Route path="programs/:id/*" element={<ProgramTabRedirect />} />
+        <Route path="sprints" element={<Navigate to="/team/allocation" replace />} />
+        {/* Sprint routes - redirect legacy views to /documents/:id, keep planning workflow */}
+        <Route path="sprints/:id" element={<DocumentRedirect />} />
+        <Route path="sprints/:id/view" element={<SprintTabRedirect tab="view" />} />
+        <Route path="sprints/:id/plan" element={<SprintTabRedirect tab="plan" />} />
+        <Route path="sprints/:id/planning" element={<SprintTabRedirect tab="planning" />} />
+        <Route path="sprints/:id/standups" element={<SprintTabRedirect tab="standups" />} />
+        <Route path="sprints/:id/review" element={<SprintTabRedirect tab="review" />} />
         <Route path="team" element={<Navigate to="/team/allocation" replace />} />
         <Route path="team/allocation" element={<TeamModePage />} />
         <Route path="team/directory" element={<TeamDirectoryPage />} />
+        <Route path="team/status" element={<StatusOverviewPage />} />
+        <Route path="team/reviews" element={<ReviewsPage />} />
+        <Route path="team/org-chart" element={<OrgChartPage />} />
+        {/* Person profile stays in Teams context - no redirect to /documents */}
         <Route path="team/:id" element={<PersonEditorPage />} />
         <Route path="feedback/:id" element={<FeedbackEditorPage />} />
         <Route path="settings" element={<WorkspaceSettingsPage />} />
@@ -209,7 +273,9 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <ToastProvider>
         <MutationErrorToast />
         <BrowserRouter>
-          <App />
+          <ReviewQueueProvider>
+            <App />
+          </ReviewQueueProvider>
         </BrowserRouter>
       </ToastProvider>
       <ReactQueryDevtools initialIsOpen={false} />

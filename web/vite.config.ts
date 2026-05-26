@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import svgr from 'vite-plugin-svgr';
 import { resolve } from 'path';
 import { readFileSync, existsSync } from 'fs';
 
@@ -35,10 +36,44 @@ export default defineConfig(({ mode }) => {
       changeOrigin: true,
       ws: true,
     },
+    '/events': {
+      target: `http://localhost:${apiPort}`,
+      changeOrigin: true,
+      ws: true,
+    },
   };
 
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      svgr({
+        // Allow importing SVGs as React components with ?react suffix
+        // e.g., import CheckIcon from '@uswds/uswds/dist/img/usa-icons/check.svg?react'
+        svgrOptions: {
+          // Use currentColor for fill to match existing icon patterns
+          plugins: ['@svgr/plugin-svgo', '@svgr/plugin-jsx'],
+          svgoConfig: {
+            plugins: [
+              {
+                name: 'preset-default',
+                params: {
+                  overrides: {
+                    removeViewBox: false,
+                  },
+                },
+              },
+              // Replace hardcoded colors with currentColor
+              {
+                name: 'convertColors',
+                params: {
+                  currentColor: true,
+                },
+              },
+            ],
+          },
+        },
+      }),
+    ],
     resolve: {
       alias: {
         '@': resolve(__dirname, './src'),
@@ -55,6 +90,33 @@ export default defineConfig(({ mode }) => {
       port: parseInt(env.VITE_PORT || '4173'),
       strictPort: true,
       proxy: proxyConfig,
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) {
+              return;
+            }
+
+            if (id.includes('/@tiptap/')) {
+              return 'editor-tiptap';
+            }
+
+            if (id.includes('/prosemirror-') || id.includes('/@tiptap/pm/')) {
+              return 'editor-prosemirror';
+            }
+
+            if (id.includes('/yjs/') || id.includes('/y-protocols/') || id.includes('/y-websocket/') || id.includes('/y-indexeddb/')) {
+              return 'editor-tiptap';
+            }
+
+            if (id.includes('/lowlight/') || id.includes('/highlight.js/')) {
+              return 'editor-code';
+            }
+          },
+        },
+      },
     },
   };
 });

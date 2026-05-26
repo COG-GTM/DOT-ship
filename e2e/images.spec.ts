@@ -33,7 +33,7 @@ async function createNewDocument(page: Page) {
 
   // Wait for URL to change to a new document
   await page.waitForFunction(
-    (oldUrl) => window.location.href !== oldUrl && /\/docs\/[a-f0-9-]+/.test(window.location.href),
+    (oldUrl) => window.location.href !== oldUrl && /\/documents\/[a-f0-9-]+/.test(window.location.href),
     currentUrl,
     { timeout: 10000 }
   );
@@ -42,7 +42,7 @@ async function createNewDocument(page: Page) {
   await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 });
 
   // Verify this is a NEW document (title should be "Untitled")
-  await expect(page.locator('input[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 });
+  await expect(page.locator('textarea[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 });
 }
 
 // Create a test image file path
@@ -86,6 +86,7 @@ async function insertImageViaSlashCommand(page: Page): Promise<void> {
   }, 5000);
 }
 
+// FIXME: Filechooser event not firing - slash command image upload interaction broken
 test.describe('Images', () => {
   test.beforeEach(async ({ page }) => {
     // Login before each test

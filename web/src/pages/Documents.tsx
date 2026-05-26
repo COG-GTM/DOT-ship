@@ -36,7 +36,7 @@ const COLUMN_VISIBILITY_KEY = 'documents-column-visibility';
 type VisibilityFilter = 'all' | 'workspace' | 'private';
 
 export function DocumentsPage() {
-  const { documents, loading, createDocument, deleteDocument } = useDocuments();
+  const { documents, loading, error, refreshDocuments, createDocument, deleteDocument } = useDocuments();
   const [creating, setCreating] = useState(false);
   const [search, setSearch] = useState('');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -136,7 +136,7 @@ export function DocumentsPage() {
     try {
       const doc = await createDocument(parentId);
       if (doc) {
-        navigate(`/docs/${doc.id}`);
+        navigate(`/documents/${doc.id}`);
       }
     } finally {
       setCreating(false);
@@ -192,6 +192,31 @@ export function DocumentsPage() {
 
   if (loading) {
     return <DocumentsListSkeleton />;
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex items-center justify-between border-b border-border px-6 py-4">
+          <h1 className="text-xl font-semibold text-foreground">Documents</h1>
+        </div>
+        <div className="flex flex-1 items-center justify-center p-6">
+          <div className="max-w-md rounded-lg border border-border bg-surface p-5 text-center shadow-sm">
+            <h2 className="text-base font-semibold text-foreground">Documents did not load</h2>
+            <p className="mt-2 text-sm text-muted">
+              Check your connection and try again.
+            </p>
+            <button
+              type="button"
+              onClick={() => void refreshDocuments()}
+              className="mt-4 rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Search filter content for toolbar (matches Issues pattern)
@@ -278,7 +303,7 @@ export function DocumentsPage() {
           </div>
         </div>
       ) : viewMode === 'tree' ? (
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto p-6 pb-20">
           <ul role="tree" aria-label="Documents" className="space-y-0.5">
             {documentTree.map((doc) => (
               <DocumentTreeItem
@@ -291,13 +316,13 @@ export function DocumentsPage() {
           </ul>
         </div>
       ) : (
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto pb-20">
           <SelectableList
             items={sortedDocuments}
             getItemId={(doc) => doc.id}
             renderRow={(doc, props) => renderDocumentRow(doc, props)}
             columns={columns}
-            onItemClick={(doc) => navigate(`/docs/${doc.id}`)}
+            onItemClick={(doc) => navigate(`/documents/${doc.id}`)}
             selectable={true}
             onSelectionChange={(ids) => setSelectedIds(ids)}
             onContextMenu={handleContextMenu}

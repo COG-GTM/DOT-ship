@@ -19,7 +19,7 @@ async function login(page: Page) {
 async function createNewDocument(page: Page) {
   await page.goto('/docs')
   await page.getByRole('button', { name: 'New Document', exact: true }).click()
-  await expect(page).toHaveURL(/\/docs\/[a-f0-9-]+/, { timeout: 10000 })
+  await expect(page).toHaveURL(/\/documents\/[a-f0-9-]+/, { timeout: 10000 })
   await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
 }
 
@@ -41,6 +41,7 @@ async function addHeadings(page: Page, headings: Array<{ level: number; text: st
   await page.waitForTimeout(500)
 }
 
+// FIXME: Slash command menu interaction not working - button locators timing out
 test.describe('Table of Contents (TOC)', () => {
   test.beforeEach(async ({ page }) => {
     await login(page)
@@ -212,10 +213,24 @@ test.describe('Table of Contents (TOC)', () => {
     let tocText = await toc.textContent()
     expect(tocText).toContain('Original Title')
 
-    // Rename the heading - use triple-click to select only heading text
-    const heading = page.locator('.ProseMirror h1').filter({ hasText: 'Original Title' })
-    await heading.click({ clickCount: 3 })
-    await page.waitForTimeout(200)
+    // Use purely keyboard-based approach to avoid inline comment overlay issues
+    // The cursor is currently in the editor after TOC insertion
+    // First dismiss any tooltips/menus
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(300)
+
+    // Go to the very start of the document (above TOC, into heading)
+    await page.keyboard.press('Meta+ArrowUp')
+    await page.waitForTimeout(100)
+    // Select the entire first line (the heading text)
+    await page.keyboard.press('Shift+Meta+ArrowDown')
+    await page.waitForTimeout(100)
+    // Now type replacement - but Shift+Meta+ArrowDown may select too much
+    // Instead, select just to end of current line
+    await page.keyboard.press('Meta+ArrowUp')  // Reset to start
+    await page.waitForTimeout(100)
+    await page.keyboard.press('Meta+Shift+ArrowRight')  // Select to end of line
+    await page.waitForTimeout(100)
     await page.keyboard.type('New Title')
     await page.waitForTimeout(1000)
 

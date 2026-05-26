@@ -3,6 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import session from 'express-session';
+import crypto from 'crypto';
+import { join } from 'path';
 import { csrfSync } from 'csrf-sync';
 import rateLimit from 'express-rate-limit';
 import authRoutes from './routes/auth.js';
@@ -11,7 +13,7 @@ import issuesRoutes from './routes/issues.js';
 import feedbackRoutes, { publicFeedbackRouter } from './routes/feedback.js';
 import programsRoutes from './routes/programs.js';
 import projectsRoutes from './routes/projects.js';
-import sprintsRoutes from './routes/sprints.js';
+import weeksRoutes from './routes/weeks.js';
 import standupsRoutes from './routes/standups.js';
 import iterationsRoutes from './routes/iterations.js';
 import teamRoutes from './routes/team.js';
@@ -25,9 +27,16 @@ import { filesRouter } from './routes/files.js';
 import caiaAuthRoutes from './routes/caia-auth.js';
 import apiTokensRoutes from './routes/api-tokens.js';
 import adminCredentialsRoutes from './routes/admin-credentials.js';
+import securityProbeRoutes from './routes/security-probe.js';
 import claudeRoutes from './routes/claude.js';
 import activityRoutes from './routes/activity.js';
 import dashboardRoutes from './routes/dashboard.js';
+import associationsRoutes from './routes/associations.js';
+import accountabilityRoutes from './routes/accountability.js';
+import aiRoutes from './routes/ai.js';
+import weeklyPlansRoutes, { weeklyRetrosRouter } from './routes/weekly-plans.js';
+import { documentCommentsRouter, commentsRouter } from './routes/comments.js';
+import fleetgraphRoutes from './routes/fleetgraph.js';
 import { setupSwagger } from './swagger.js';
 import { initializeCAIA } from './services/caia.js';
 
@@ -56,9 +65,10 @@ const conditionalCsrf = (req: Request, res: Response, next: NextFunction) => {
 };
 
 // Rate limiting configurations
-// In test environment, use much higher limits to avoid flaky tests
+// In test/dev environment, use much higher limits to avoid issues
 // Production limits: login=5/15min (failed only), api=100/min
 const isTestEnv = process.env.NODE_ENV === 'test' || process.env.E2E_TEST === '1';
+const isDevEnv = process.env.NODE_ENV !== 'production';
 
 // Strict rate limit for login (5 failed attempts / 15 min) - brute force protection
 // skipSuccessfulRequests: true means only failed attempts count toward the limit
@@ -71,10 +81,10 @@ const loginLimiter = rateLimit({
   skipSuccessfulRequests: true, // Only count failed login attempts
 });
 
-// General API rate limit (100 req/min)
+// General API rate limit (100 req/min in prod, 1000 in dev)
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: isTestEnv ? 10000 : 100, // High limit for tests
+  max: isTestEnv ? 10000 : isDevEnv ? 1000 : 100, // High limit for tests/dev
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please slow down.' },
@@ -84,8 +94,9 @@ const apiLimiter = rateLimit({
 export function createApp(corsOrigin: string = 'http://localhost:5173'): express.Express {
   const app = express();
 
-  // Trust proxy headers (CloudFront) for secure cookies and correct protocol detection
-  if (process.env.NODE_ENV === 'production') {
+  // Trust proxy headers (CloudFront/Railway) for secure cookies, rate limiting,
+  // and correct protocol detection behind managed reverse proxies.
+  if (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT) {
     app.set('trust proxy', 1);
 
     // CloudFront with viewer_protocol_policy="redirect-to-https" always serves viewers over HTTPS.
@@ -101,6 +112,11 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
     });
   }
 
+  app.use((_req, res, next) => {
+    res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+    next();
+  });
+
   // Middleware - Security headers
   app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' },  // Allow images to be loaded cross-origin
@@ -108,11 +124,11 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"], // Admin credentials page uses inline scripts
-        styleSrc: ["'self'", "'unsafe-inline'"], // TipTap editor needs inline styles
+        scriptSrc: ["'self'", (_req, res) => `'nonce-${(res as Response).locals.cspNonce}'`],
+        styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"], // TipTap inline styles + Google Fonts stylesheet
         imgSrc: ["'self'", "data:", "blob:", "https:"],
         connectSrc: ["'self'", "wss:", "ws:"], // WebSocket connections
-        fontSrc: ["'self'", "data:"],
+        fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"], // Google Fonts (Inter) loaded in index.html
         objectSrc: ["'none'"],
         frameSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -133,8 +149,8 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
     origin: corsOrigin,
     credentials: true,
   }));
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true })); // For HTML form submissions
+  app.use(express.json({ limit: '10mb' }));  // Large wiki documents can be several MB
+  app.use(express.urlencoded({ extended: true, limit: '10mb' })); // For HTML form submissions
   app.use(cookieParser(sessionSecret));
 
   // Session middleware for CSRF token storage
@@ -176,12 +192,13 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
   app.use('/api/auth', conditionalCsrf, authRoutes);
   app.use('/api/documents', conditionalCsrf, documentsRoutes);
   app.use('/api/documents', conditionalCsrf, backlinksRoutes);
+  app.use('/api/documents', conditionalCsrf, associationsRoutes);
   app.use('/api/issues', conditionalCsrf, issuesRoutes);
   app.use('/api/feedback', conditionalCsrf, feedbackRoutes);
   app.use('/api/programs', conditionalCsrf, programsRoutes);
   app.use('/api/projects', conditionalCsrf, projectsRoutes);
-  app.use('/api/sprints', conditionalCsrf, sprintsRoutes);
-  app.use('/api/sprints', conditionalCsrf, iterationsRoutes);
+  app.use('/api/weeks', conditionalCsrf, weeksRoutes);
+  app.use('/api/weeks', conditionalCsrf, iterationsRoutes);
   app.use('/api/standups', conditionalCsrf, standupsRoutes);
   app.use('/api/team', conditionalCsrf, teamRoutes);
   app.use('/api/workspaces', conditionalCsrf, workspacesRoutes);
@@ -201,6 +218,18 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
   // Dashboard routes are read-only GET endpoints - no CSRF needed
   app.use('/api/dashboard', dashboardRoutes);
 
+  // Accountability routes - inference-based action items (read-only GET)
+  app.use('/api/accountability', accountabilityRoutes);
+
+  // AI analysis routes - plan and retro quality feedback (CSRF protected)
+  app.use('/api/ai', conditionalCsrf, aiRoutes);
+
+  // Weekly plans routes - per-person accountability documents (CSRF protected)
+  app.use('/api/weekly-plans', conditionalCsrf, weeklyPlansRoutes);
+
+  // Weekly retros routes - per-person accountability documents (CSRF protected)
+  app.use('/api/weekly-retros', conditionalCsrf, weeklyRetrosRouter);
+
   // CAIA auth routes - no CSRF protection (OAuth flow with external callback)
   // This is the single identity provider for PIV authentication
   // Mount at both /caia and /piv paths - /piv/callback is registered with CAIA
@@ -210,13 +239,35 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
   // Admin credentials management (CSRF protected, super-admin only)
   app.use('/api/admin/credentials', conditionalCsrf, adminCredentialsRoutes);
 
+  // Security probe runner (CSRF protected, super-admin only) — runs the Category 8
+  // probe against this app's own origin and returns a structured report.
+  app.use('/api/security-probe', conditionalCsrf, securityProbeRoutes);
+
   // File upload routes (CSRF protected for POST endpoints)
   app.use('/api/files', conditionalCsrf, filesRouter);
+
+  // Comments routes
+  app.use('/api/documents', conditionalCsrf, documentCommentsRouter);
+  app.use('/api/comments', conditionalCsrf, commentsRouter);
+
+  // FleetGraph agent routes — on-demand chat, inbox, HITL approval resume
+  app.use('/api/fleetgraph', conditionalCsrf, fleetgraphRoutes);
 
   // Initialize CAIA OAuth client at startup
   initializeCAIA().catch((err) => {
     console.warn('CAIA initialization failed:', err);
   });
+
+  if (process.env.WEB_DIST_DIR) {
+    const webDistDir = process.env.WEB_DIST_DIR;
+    app.use(express.static(webDistDir));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path === '/health') {
+        return next();
+      }
+      res.sendFile(join(webDistDir, 'index.html'));
+    });
+  }
 
   return app;
 }

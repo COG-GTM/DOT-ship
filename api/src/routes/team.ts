@@ -2,9 +2,13 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db/client.js';
 import { getVisibilityContext, VISIBILITY_FILTER_SQL } from '../middleware/visibility.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { TEMPLATE_HEADINGS, extractText, hasContent } from '../utils/document-content.js';
 
 type RouterType = ReturnType<typeof Router>;
 const router: RouterType = Router();
+
+const ACCOUNTABILITY_GRID_CACHE_TTL_MS = 10_000;
+const accountabilityGridCache = new Map<string, { expiresAt: number; body: string }>();
 
 // GET /api/team/grid - Get team grid data
 // Query params:
@@ -31,7 +35,8 @@ router.get('/grid', authMiddleware, async (req: Request, res: Response) => {
          d.title as name,
          COALESCE(d.properties->>'email', u.email) as email,
          CASE WHEN d.archived_at IS NOT NULL THEN true ELSE false END as "isArchived",
-         CASE WHEN d.properties->>'pending' = 'true' THEN true ELSE false END as "isPending"
+         CASE WHEN d.properties->>'pending' = 'true' THEN true ELSE false END as "isPending",
+         d.properties->>'reports_to' as "reportsTo"
        FROM documents d
        LEFT JOIN users u ON u.id = (d.properties->>'user_id')::uuid
        WHERE d.workspace_id = $1
@@ -92,7 +97,7 @@ router.get('/grid', authMiddleware, async (req: Request, res: Response) => {
 
       sprints.push({
         number: i,
-        name: `Sprint ${i}`,
+        name: `Week ${i}`,
         startDate: sprintStart.toISOString().split('T')[0],
         endDate: sprintEnd.toISOString().split('T')[0],
         isCurrent: i === currentSprintNumber,
@@ -104,10 +109,12 @@ router.get('/grid', authMiddleware, async (req: Request, res: Response) => {
     const maxDate = sprints[sprints.length - 1]?.endDate || today.toISOString().split('T')[0];
 
     const dbSprintsResult = await pool.query(
-      `SELECT d.id, d.title as name, d.properties->>'start_date' as start_date, d.properties->>'end_date' as end_date, d.program_id,
+      `SELECT d.id, d.title as name, d.properties->>'start_date' as start_date, d.properties->>'end_date' as end_date,
+              prog_da.related_id as program_id,
               p.title as program_name, p.properties->>'emoji' as program_emoji, p.properties->>'color' as program_color
        FROM documents d
-       JOIN documents p ON d.program_id = p.id
+       LEFT JOIN document_associations prog_da ON d.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+       LEFT JOIN documents p ON prog_da.related_id = p.id AND p.document_type = 'program'
        WHERE d.workspace_id = $1 AND d.document_type = 'sprint'
          AND (d.properties->>'start_date')::date >= $2 AND (d.properties->>'end_date')::date <= $3
          AND ${VISIBILITY_FILTER_SQL('d', '$4', '$5')}`,
@@ -116,13 +123,15 @@ router.get('/grid', authMiddleware, async (req: Request, res: Response) => {
 
     // Get issues with sprint and assignee info (only visible issues)
     const issuesResult = await pool.query(
-      `SELECT i.id, i.title, i.sprint_id, i.properties->>'assignee_id' as assignee_id, i.properties->>'state' as state, i.ticket_number,
+      `SELECT i.id, i.title, da_sprint.related_id as sprint_id, i.properties->>'assignee_id' as assignee_id, i.properties->>'state' as state, i.ticket_number,
               s.properties->>'start_date' as sprint_start, s.properties->>'end_date' as sprint_end,
-              p.id as program_id, p.title as program_name, p.properties->>'emoji' as program_emoji, p.properties->>'color' as program_color
+              prog_da.related_id as program_id, p.title as program_name, p.properties->>'emoji' as program_emoji, p.properties->>'color' as program_color
        FROM documents i
-       JOIN documents s ON i.sprint_id = s.id
-       JOIN documents p ON i.program_id = p.id
-       WHERE i.workspace_id = $1 AND i.document_type = 'issue' AND i.sprint_id IS NOT NULL AND i.properties->>'assignee_id' IS NOT NULL
+       JOIN document_associations da_sprint ON da_sprint.document_id = i.id AND da_sprint.relationship_type = 'sprint'
+       JOIN documents s ON s.id = da_sprint.related_id
+       LEFT JOIN document_associations prog_da ON i.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+       LEFT JOIN documents p ON prog_da.related_id = p.id AND p.document_type = 'program'
+       WHERE i.workspace_id = $1 AND i.document_type = 'issue' AND i.properties->>'assignee_id' IS NOT NULL
          AND ${VISIBILITY_FILTER_SQL('i', '$2', '$3')}`,
       [workspaceId, userId, isAdmin]
     );
@@ -179,7 +188,7 @@ router.get('/grid', authMiddleware, async (req: Request, res: Response) => {
 
     res.json({
       users: usersResult.rows,
-      sprints,
+      weeks: sprints,
       associations,
       currentSprintNumber,
     });
@@ -205,12 +214,14 @@ router.get('/projects', authMiddleware, async (req: Request, res: Response) => {
       `SELECT
          proj.id,
          proj.title,
-         proj.program_id as "programId",
+         proj.properties->>'color' as "color",
+         prog_da.related_id as "programId",
          prog.title as "programName",
          prog.properties->>'emoji' as "programEmoji",
          prog.properties->>'color' as "programColor"
        FROM documents proj
-       LEFT JOIN documents prog ON proj.program_id = prog.id AND prog.document_type = 'program'
+       LEFT JOIN document_associations prog_da ON proj.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+       LEFT JOIN documents prog ON prog_da.related_id = prog.id AND prog.document_type = 'program'
        WHERE proj.workspace_id = $1
          AND proj.document_type = 'project'
          AND proj.archived_at IS NULL
@@ -263,20 +274,24 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
     const { isAdmin } = await getVisibilityContext(userId, workspaceId);
 
     // First, get explicit sprint document assignments (assignee_ids array + project_id in properties)
-    // Use sprint's program_id directly (handles legacy programId assignments without project)
+    // Program is resolved via: project -> program (preferred), or sprint -> program (fallback for legacy programId assignments)
     const explicitResult = await pool.query(
       `SELECT
          jsonb_array_elements_text(s.properties->'assignee_ids') as person_id,
          (s.properties->>'sprint_number')::int as sprint_number,
          s.properties->>'project_id' as project_id,
          proj.title as project_name,
-         s.program_id,
-         prog.title as program_name,
-         prog.properties->>'emoji' as program_emoji,
-         prog.properties->>'color' as program_color
+         proj.properties->>'color' as project_color,
+         COALESCE(prog_da.related_id, sprint_prog_da.related_id) as program_id,
+         COALESCE(prog.title, sprint_prog.title) as program_name,
+         COALESCE(prog.properties->>'emoji', sprint_prog.properties->>'emoji') as program_emoji,
+         COALESCE(prog.properties->>'color', sprint_prog.properties->>'color') as program_color
        FROM documents s
        LEFT JOIN documents proj ON (s.properties->>'project_id')::uuid = proj.id
-       LEFT JOIN documents prog ON s.program_id = prog.id
+       LEFT JOIN document_associations prog_da ON proj.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+       LEFT JOIN documents prog ON prog_da.related_id = prog.id AND prog.document_type = 'program'
+       LEFT JOIN document_associations sprint_prog_da ON s.id = sprint_prog_da.document_id AND sprint_prog_da.relationship_type = 'program'
+       LEFT JOIN documents sprint_prog ON sprint_prog_da.related_id = sprint_prog.id AND sprint_prog.document_type = 'program'
        WHERE s.workspace_id = $1
          AND s.document_type = 'sprint'
          AND jsonb_array_length(COALESCE(s.properties->'assignee_ids', '[]'::jsonb)) > 0
@@ -288,6 +303,7 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
     const assignments: Record<string, Record<number, {
       projectId: string | null;
       projectName: string | null;
+      projectColor: string | null;
       programId: string | null;
       programName: string | null;
       emoji: string | null;
@@ -305,6 +321,7 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
       assignments[personId][sprintNumber] = {
         projectId: row.project_id,
         projectName: row.project_name,
+        projectColor: row.project_color,
         programId: row.program_id,
         programName: row.program_name,
         emoji: row.program_emoji,
@@ -335,21 +352,23 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
     const issuesResult = await pool.query(
       `SELECT
          i.properties->>'assignee_id' as assignee_id,
-         i.project_id,
+         da_project.related_id as project_id,
          proj.title as project_name,
-         proj.program_id,
+         proj.properties->>'color' as project_color,
+         proj_prog_da.related_id as program_id,
          prog.title as program_name,
          prog.properties->>'emoji' as program_emoji,
          prog.properties->>'color' as program_color,
          s.properties->>'start_date' as sprint_start
        FROM documents i
-       JOIN documents s ON i.sprint_id = s.id
-       JOIN documents proj ON i.project_id = proj.id
-       LEFT JOIN documents prog ON proj.program_id = prog.id
+       JOIN document_associations da_sprint ON da_sprint.document_id = i.id AND da_sprint.relationship_type = 'sprint'
+       JOIN documents s ON s.id = da_sprint.related_id
+       JOIN document_associations da_project ON da_project.document_id = i.id AND da_project.relationship_type = 'project'
+       JOIN documents proj ON proj.id = da_project.related_id
+       LEFT JOIN document_associations proj_prog_da ON proj.id = proj_prog_da.document_id AND proj_prog_da.relationship_type = 'program'
+       LEFT JOIN documents prog ON proj_prog_da.related_id = prog.id AND prog.document_type = 'program'
        WHERE i.workspace_id = $1
          AND i.document_type = 'issue'
-         AND i.sprint_id IS NOT NULL
-         AND i.project_id IS NOT NULL
          AND i.properties->>'assignee_id' IS NOT NULL
          AND ${VISIBILITY_FILTER_SQL('i', '$2', '$3')}`,
       [workspaceId, userId, isAdmin]
@@ -360,6 +379,7 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
       count: number;
       projectId: string;
       projectName: string;
+      projectColor: string | null;
       programId: string | null;
       programName: string | null;
       programEmoji: string | null;
@@ -389,6 +409,7 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
           count: 0,
           projectId,
           projectName: issue.project_name,
+          projectColor: issue.project_color,
           programId: issue.program_id,
           programName: issue.program_name,
           programEmoji: issue.program_emoji,
@@ -421,6 +442,7 @@ router.get('/assignments', authMiddleware, async (req: Request, res: Response) =
           assignments[personId][sprintNum] = {
             projectId: primaryProject.projectId,
             projectName: primaryProject.projectName,
+            projectColor: primaryProject.projectColor,
             programId: primaryProject.programId,
             programName: primaryProject.programName,
             emoji: primaryProject.programEmoji,
@@ -490,10 +512,12 @@ router.post('/assign', authMiddleware, async (req: Request, res: Response) => {
     let resolvedProjectId: string | null = null;
 
     if (isProjectAssignment) {
-      // Validate projectId and get its parent program
+      // Validate projectId and get its parent program via document_associations
       const projectCheck = await pool.query(
-        `SELECT id, program_id FROM documents
-         WHERE id = $1 AND workspace_id = $2 AND document_type = 'project'`,
+        `SELECT d.id, prog_da.related_id as program_id
+         FROM documents d
+         LEFT JOIN document_associations prog_da ON d.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+         WHERE d.id = $1 AND d.workspace_id = $2 AND d.document_type = 'project'`,
         [projectId, workspaceId]
       );
       if (!projectCheck.rows[0]) {
@@ -501,13 +525,7 @@ router.post('/assign', authMiddleware, async (req: Request, res: Response) => {
         return;
       }
       resolvedProjectId = projectId;
-      resolvedProgramId = projectCheck.rows[0].program_id;
-
-      // If project has no program, create a dummy program reference or handle gracefully
-      if (!resolvedProgramId) {
-        res.status(400).json({ error: 'Project must belong to a program' });
-        return;
-      }
+      resolvedProgramId = projectCheck.rows[0].program_id; // Can be null for projects without programs
     } else {
       // Legacy: Validate programId belongs to current workspace
       const programCheck = await pool.query(
@@ -523,6 +541,7 @@ router.post('/assign', authMiddleware, async (req: Request, res: Response) => {
     }
 
     // Check if person is already assigned to this exact project/sprint (prevent duplicates)
+    // Use IS NOT DISTINCT FROM for program_id to handle NULL values correctly
     const existingAssignment = await pool.query(
       `SELECT s.id
        FROM documents s
@@ -530,7 +549,7 @@ router.post('/assign', authMiddleware, async (req: Request, res: Response) => {
          AND s.properties->'assignee_ids' ? $2
          AND (s.properties->>'sprint_number')::int = $3
          AND s.properties->>'project_id' = $4
-         AND s.program_id = $5`,
+         AND ($5::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM document_associations WHERE document_id = s.id AND relationship_type = 'program') OR s.id IN (SELECT document_id FROM document_associations WHERE related_id = $5 AND relationship_type = 'program'))`,
       [workspaceId, personDocId, sprintNumber, resolvedProjectId, resolvedProgramId]
     );
 
@@ -540,11 +559,33 @@ router.post('/assign', authMiddleware, async (req: Request, res: Response) => {
       return;
     }
 
+    // Enforce one allocation per person per week: remove from any OTHER project's sprint
+    // for the same sprint_number before assigning to the new one.
+    const conflictingSprints = await pool.query(
+      `SELECT id, properties FROM documents
+       WHERE workspace_id = $1 AND document_type = 'sprint'
+         AND (properties->>'sprint_number')::int = $2
+         AND properties->'assignee_ids' @> to_jsonb($3::text)
+         AND (properties->>'project_id' IS DISTINCT FROM $4)`,
+      [workspaceId, sprintNumber, personDocId, resolvedProjectId]
+    );
+
+    for (const conflicting of conflictingSprints.rows) {
+      const props = conflicting.properties || {};
+      const assignees: string[] = (props.assignee_ids || []).filter((id: string) => id !== personDocId);
+      await pool.query(
+        `UPDATE documents SET properties = jsonb_set(properties, '{assignee_ids}', $1::jsonb), updated_at = now() WHERE id = $2`,
+        [JSON.stringify(assignees), conflicting.id]
+      );
+    }
+
     // Find existing sprint for this program, project, and sprint number
+    // Use IS NOT DISTINCT FROM for program_id to handle NULL values correctly
     let sprintResult = await pool.query(
       `SELECT id, properties FROM documents
        WHERE workspace_id = $1 AND document_type = 'sprint'
-         AND program_id = $2 AND (properties->>'sprint_number')::int = $3
+         AND ($2::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM document_associations WHERE document_id = documents.id AND relationship_type = 'program') OR id IN (SELECT document_id FROM document_associations WHERE related_id = $2 AND relationship_type = 'program'))
+         AND (properties->>'sprint_number')::int = $3
          AND properties->>'project_id' = $4`,
       [workspaceId, resolvedProgramId, sprintNumber, resolvedProjectId]
     );
@@ -581,12 +622,19 @@ router.post('/assign', authMiddleware, async (req: Request, res: Response) => {
       }
 
       const newSprintResult = await pool.query(
-        `INSERT INTO documents (workspace_id, document_type, title, program_id, properties)
-         VALUES ($1, 'sprint', $2, $3, $4)
+        `INSERT INTO documents (workspace_id, document_type, title, properties)
+         VALUES ($1, 'sprint', $2, $3)
          RETURNING id`,
-        [workspaceId, `Sprint ${sprintNumber}`, resolvedProgramId, JSON.stringify(props)]
+        [workspaceId, `Week ${sprintNumber}`, JSON.stringify(props)]
       );
       sprintId = newSprintResult.rows[0].id;
+
+      // Create program association for the new sprint
+      await pool.query(
+        `INSERT INTO document_associations (document_id, related_id, relationship_type)
+         VALUES ($1, $2, 'program')`,
+        [sprintId, resolvedProgramId]
+      );
     }
 
     res.json({ success: true, sprintId });
@@ -701,7 +749,9 @@ router.get('/people', authMiddleware, async (req: Request, res: Response) => {
       `SELECT d.id, d.properties->>'user_id' as user_id, d.title as name,
               COALESCE(d.properties->>'email', u.email) as email,
               CASE WHEN d.archived_at IS NOT NULL THEN true ELSE false END as "isArchived",
-              CASE WHEN d.properties->>'pending' = 'true' THEN true ELSE false END as "isPending"
+              CASE WHEN d.properties->>'pending' = 'true' THEN true ELSE false END as "isPending",
+              d.properties->>'reports_to' as "reportsTo",
+              d.properties->>'role' as role
        FROM documents d
        LEFT JOIN users u ON u.id = (d.properties->>'user_id')::uuid
        WHERE d.workspace_id = $1
@@ -770,7 +820,7 @@ router.get('/accountability', authMiddleware, async (req: Request, res: Response
 
       sprints.push({
         number: i,
-        name: `Sprint ${i}`,
+        name: `Week ${i}`,
         startDate: sprintStart.toISOString().split('T')[0],
         endDate: sprintEnd.toISOString().split('T')[0],
         isCurrent: i === currentSprintNumber,
@@ -795,15 +845,15 @@ router.get('/accountability', authMiddleware, async (req: Request, res: Response
     const issuesResult = await pool.query(
       `SELECT
          i.properties->>'assignee_id' as assignee_id,
-         i.sprint_id,
+         da_sprint.related_id as sprint_id,
          COALESCE((i.properties->>'estimate')::numeric, 0) as estimate,
          i.properties->>'state' as state,
          s.properties->>'sprint_number' as sprint_number
        FROM documents i
-       JOIN documents s ON i.sprint_id = s.id
+       JOIN document_associations da_sprint ON da_sprint.document_id = i.id AND da_sprint.relationship_type = 'sprint'
+       JOIN documents s ON s.id = da_sprint.related_id
        WHERE i.workspace_id = $1
          AND i.document_type = 'issue'
-         AND i.sprint_id IS NOT NULL
          AND i.properties->>'assignee_id' IS NOT NULL`,
       [workspaceId]
     );
@@ -958,7 +1008,7 @@ router.get('/people/:personId/sprint-metrics', authMiddleware, async (req: Reque
 
       sprints.push({
         number: i,
-        name: `Sprint ${i}`,
+        name: `Week ${i}`,
         startDate: sprintStart.toISOString().split('T')[0],
         endDate: sprintEnd.toISOString().split('T')[0],
         isCurrent: i === currentSprintNumber,
@@ -972,10 +1022,10 @@ router.get('/people/:personId/sprint-metrics', authMiddleware, async (req: Reque
          i.properties->>'state' as state,
          s.properties->>'sprint_number' as sprint_number
        FROM documents i
-       JOIN documents s ON i.sprint_id = s.id
+       JOIN document_associations da_sprint ON da_sprint.document_id = i.id AND da_sprint.relationship_type = 'sprint'
+       JOIN documents s ON s.id = da_sprint.related_id
        WHERE i.workspace_id = $1
          AND i.document_type = 'issue'
-         AND i.sprint_id IS NOT NULL
          AND i.properties->>'assignee_id' = $2`,
       [workspaceId, targetUserId]
     );
@@ -1017,6 +1067,1148 @@ router.get('/people/:personId/sprint-metrics', authMiddleware, async (req: Reque
     });
   } catch (err) {
     console.error('Get person sprint metrics error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/team/accountability-grid-v2 - Get per-person plan/retro status for all projects
+// Returns: { programs: [{ projects: [{ people: [{ weeks }] }] }], weeks, currentSprintNumber }
+// Query params:
+//   showArchived: boolean - include archived projects (default: false)
+router.get('/accountability-grid-v2', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const workspaceId = req.workspaceId!;
+    const showArchived = req.query.showArchived === 'true';
+
+    // Check if user is admin
+    const { isAdmin } = await getVisibilityContext(userId, workspaceId);
+    if (!isAdmin) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    // Get workspace sprint config
+    const workspaceResult = await pool.query(
+      `SELECT sprint_start_date FROM workspaces WHERE id = $1`,
+      [workspaceId]
+    );
+
+    if (workspaceResult.rows.length === 0) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const rawSprintStartDate = workspaceResult.rows[0]?.sprint_start_date;
+    const sprintDurationDays = 7;
+    const today = new Date();
+
+    let sprintStartDate: Date;
+    if (rawSprintStartDate instanceof Date) {
+      sprintStartDate = new Date(Date.UTC(rawSprintStartDate.getFullYear(), rawSprintStartDate.getMonth(), rawSprintStartDate.getDate()));
+    } else if (typeof rawSprintStartDate === 'string') {
+      sprintStartDate = new Date(rawSprintStartDate + 'T00:00:00Z');
+    } else {
+      sprintStartDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    }
+
+    // Calculate current sprint number
+    const daysSinceStart = Math.floor((today.getTime() - sprintStartDate.getTime()) / (1000 * 60 * 60 * 24));
+    const currentSprintNumber = Math.max(1, Math.floor(daysSinceStart / sprintDurationDays) + 1);
+
+    // Get sprint range (last 6 sprints + current + next 2)
+    const fromSprint = Math.max(1, currentSprintNumber - 6);
+    const toSprint = currentSprintNumber + 2;
+
+    // Generate weeks array
+    const weeks: { number: number; name: string; startDate: string; endDate: string; isCurrent: boolean }[] = [];
+    for (let i = fromSprint; i <= toSprint; i++) {
+      const weekStart = new Date(sprintStartDate);
+      weekStart.setUTCDate(weekStart.getUTCDate() + (i - 1) * sprintDurationDays);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setUTCDate(weekEnd.getUTCDate() + sprintDurationDays - 1);
+
+      weeks.push({
+        number: i,
+        name: `Week ${i}`,
+        startDate: weekStart.toISOString().split('T')[0] || '',
+        endDate: weekEnd.toISOString().split('T')[0] || '',
+        isCurrent: i === currentSprintNumber,
+      });
+    }
+
+    // Get all workspace people
+    const peopleResult = await pool.query(
+      `SELECT id, title as name
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'person'
+         AND archived_at IS NULL
+       ORDER BY title`,
+      [workspaceId]
+    );
+
+    // Get all programs with their projects
+    const programsResult = await pool.query(
+      `SELECT
+         prog.id as program_id,
+         prog.title as program_name,
+         prog.properties->>'color' as program_color,
+         proj.id as project_id,
+         proj.title as project_title,
+         proj.properties->>'color' as project_color,
+         proj.archived_at as project_archived_at
+       FROM documents prog
+       LEFT JOIN document_associations da ON da.related_id = prog.id AND da.relationship_type = 'program'
+       LEFT JOIN documents proj ON proj.id = da.document_id AND proj.document_type = 'project'
+       WHERE prog.workspace_id = $1
+         AND prog.document_type = 'program'
+         AND prog.archived_at IS NULL
+         AND (proj.id IS NULL OR ($2 OR proj.archived_at IS NULL))
+       ORDER BY prog.title, proj.title`,
+      [workspaceId, showArchived]
+    );
+
+    // Also get projects without a program
+    const unassignedProjectsResult = await pool.query(
+      `SELECT
+         proj.id as project_id,
+         proj.title as project_title,
+         proj.properties->>'color' as project_color,
+         proj.archived_at as project_archived_at
+       FROM documents proj
+       WHERE proj.workspace_id = $1
+         AND proj.document_type = 'project'
+         AND ($2 OR proj.archived_at IS NULL)
+         AND NOT EXISTS (
+           SELECT 1 FROM document_associations da
+           WHERE da.document_id = proj.id AND da.relationship_type = 'program'
+         )
+       ORDER BY proj.title`,
+      [workspaceId, showArchived]
+    );
+
+    // Get ALL weekly plans in the workspace for the week range
+    const plansResult = await pool.query(
+      `SELECT
+         (properties->>'person_id') as person_id,
+         (properties->>'project_id') as project_id,
+         (properties->>'week_number')::int as week_number,
+         id,
+         content
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'weekly_plan'
+         AND deleted_at IS NULL
+         AND (properties->>'week_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Get ALL weekly retros in the workspace for the week range
+    const retrosResult = await pool.query(
+      `SELECT
+         (properties->>'person_id') as person_id,
+         (properties->>'project_id') as project_id,
+         (properties->>'week_number')::int as week_number,
+         id,
+         content
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'weekly_retro'
+         AND deleted_at IS NULL
+         AND (properties->>'week_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Helper to calculate plan/retro status based on timing
+    const calculateStatus = (
+      docId: string | null,
+      docContent: unknown,
+      weekStartDate: Date,
+      type: 'plan' | 'retro'
+    ): 'done' | 'due' | 'late' | 'future' => {
+      if (docId && hasContent(docContent)) {
+        return 'done';
+      }
+
+      const now = new Date();
+      now.setUTCHours(0, 0, 0, 0);
+
+      if (type === 'plan') {
+        const yellowStart = new Date(weekStartDate);
+        yellowStart.setUTCDate(yellowStart.getUTCDate() - 2); // Saturday
+        const redStart = new Date(weekStartDate);
+        redStart.setUTCDate(redStart.getUTCDate() + 2); // Tuesday 00:00
+
+        if (now < yellowStart) return 'future';
+        if (now >= redStart) return 'late';
+        return 'due';
+      } else {
+        const yellowStart = new Date(weekStartDate);
+        yellowStart.setUTCDate(yellowStart.getUTCDate() + 4); // Friday
+        const redStart = new Date(weekStartDate);
+        redStart.setUTCDate(redStart.getUTCDate() + 7); // Monday of next week
+
+        if (now < yellowStart) return 'future';
+        if (now >= redStart) return 'late';
+        return 'due';
+      }
+    };
+
+    // Build plan/retro maps: `${projectId}_${personId}_${weekNumber}` -> { id, content }
+    const plans = new Map<string, { id: string; content: unknown }>();
+    for (const row of plansResult.rows) {
+      plans.set(`${row.project_id}_${row.person_id}_${row.week_number}`, { id: row.id, content: row.content });
+    }
+
+    const retros = new Map<string, { id: string; content: unknown }>();
+    for (const row of retrosResult.rows) {
+      retros.set(`${row.project_id}_${row.person_id}_${row.week_number}`, { id: row.id, content: row.content });
+    }
+
+    // Build program -> projects structure
+    const programsMap = new Map<string, {
+      id: string;
+      name: string;
+      color: string;
+      projects: Map<string, { id: string; title: string; color: string; isArchived: boolean }>;
+    }>();
+
+    for (const row of programsResult.rows) {
+      if (!programsMap.has(row.program_id)) {
+        programsMap.set(row.program_id, {
+          id: row.program_id,
+          name: row.program_name,
+          color: row.program_color || '#6b7280',
+          projects: new Map(),
+        });
+      }
+      if (row.project_id) {
+        programsMap.get(row.program_id)!.projects.set(row.project_id, {
+          id: row.project_id,
+          title: row.project_title,
+          color: row.project_color || '#6b7280',
+          isArchived: !!row.project_archived_at,
+        });
+      }
+    }
+
+    // Build people data with weeks for each project
+    const buildPeopleForProject = (projectId: string) => {
+      return peopleResult.rows.map(person => ({
+        id: person.id,
+        name: person.name,
+        weeks: Object.fromEntries(
+          weeks.map(week => {
+            const weekStartDate = new Date(week.startDate);
+            const planData = plans.get(`${projectId}_${person.id}_${week.number}`);
+            const retroData = retros.get(`${projectId}_${person.id}_${week.number}`);
+
+            return [
+              week.number,
+              {
+                planId: planData?.id || null,
+                planStatus: calculateStatus(planData?.id || null, planData?.content, weekStartDate, 'plan'),
+                retroId: retroData?.id || null,
+                retroStatus: calculateStatus(retroData?.id || null, retroData?.content, weekStartDate, 'retro'),
+              },
+            ];
+          })
+        ),
+      }));
+    };
+
+    // Build final programs array
+    const programs = Array.from(programsMap.values()).map(program => ({
+      id: program.id,
+      name: program.name,
+      color: program.color,
+      projects: Array.from(program.projects.values()).map(project => ({
+        id: project.id,
+        title: project.title,
+        color: project.color,
+        isArchived: project.isArchived,
+        people: buildPeopleForProject(project.id),
+      })),
+    }));
+
+    // Add unassigned projects as a pseudo-program
+    if (unassignedProjectsResult.rows.length > 0) {
+      programs.push({
+        id: 'unassigned',
+        name: 'No Program',
+        color: '#6b7280',
+        projects: unassignedProjectsResult.rows.map(row => ({
+          id: row.project_id,
+          title: row.project_title,
+          color: row.project_color || '#6b7280',
+          isArchived: !!row.project_archived_at,
+          people: buildPeopleForProject(row.project_id),
+        })),
+      });
+    }
+
+    res.json({
+      programs,
+      weeks,
+      currentSprintNumber,
+    });
+  } catch (err) {
+    console.error('Get accountability grid v2 error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/team/reviews - Manager review grid (approval status + performance ratings)
+// Returns: { people, weeks, reviews, currentSprintNumber }
+router.get('/reviews', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const workspaceId = req.workspaceId!;
+    const sprintCount = Math.min(parseInt(req.query.sprint_count as string, 10) || 5, 20);
+    const showArchived = req.query.showArchived === 'true';
+
+    // Check admin access
+    const { isAdmin } = await getVisibilityContext(userId, workspaceId);
+    if (!isAdmin) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    // Get workspace sprint config
+    const workspaceResult = await pool.query(
+      `SELECT sprint_start_date FROM workspaces WHERE id = $1`,
+      [workspaceId]
+    );
+
+    if (workspaceResult.rows.length === 0) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const rawSprintStartDate = workspaceResult.rows[0]?.sprint_start_date;
+    const sprintDurationDays = 7;
+    const today = new Date();
+
+    let sprintStartDate: Date;
+    if (rawSprintStartDate instanceof Date) {
+      sprintStartDate = new Date(Date.UTC(rawSprintStartDate.getFullYear(), rawSprintStartDate.getMonth(), rawSprintStartDate.getDate()));
+    } else if (typeof rawSprintStartDate === 'string') {
+      sprintStartDate = new Date(rawSprintStartDate + 'T00:00:00Z');
+    } else {
+      sprintStartDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    }
+
+    // Calculate current sprint number and range
+    const daysSinceStart = Math.floor((today.getTime() - sprintStartDate.getTime()) / (1000 * 60 * 60 * 24));
+    const currentSprintNumber = Math.max(1, Math.floor(daysSinceStart / sprintDurationDays) + 1);
+    const fromSprint = Math.max(1, currentSprintNumber - sprintCount + 1);
+    const toSprint = currentSprintNumber;
+
+    // Generate weeks array
+    const weeks: { number: number; name: string; startDate: string; endDate: string; isCurrent: boolean }[] = [];
+    for (let i = fromSprint; i <= toSprint; i++) {
+      const weekStart = new Date(sprintStartDate);
+      weekStart.setUTCDate(weekStart.getUTCDate() + (i - 1) * sprintDurationDays);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setUTCDate(weekEnd.getUTCDate() + sprintDurationDays - 1);
+
+      weeks.push({
+        number: i,
+        name: `Week ${i}`,
+        startDate: weekStart.toISOString().split('T')[0] || '',
+        endDate: weekEnd.toISOString().split('T')[0] || '',
+        isCurrent: i === currentSprintNumber,
+      });
+    }
+
+    // Get all workspace people (include reports_to for My Team filter)
+    const peopleResult = await pool.query(
+      `SELECT id, title as name, properties->>'reports_to' as "reportsTo"
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'person'
+         AND ($2 OR archived_at IS NULL)
+       ORDER BY title`,
+      [workspaceId, showArchived]
+    );
+
+    // Get sprint documents with approval/rating properties
+    const sprintsResult = await pool.query(
+      `SELECT
+         jsonb_array_elements_text(s.properties->'assignee_ids') as person_id,
+         (s.properties->>'sprint_number')::int as sprint_number,
+         s.id as sprint_id,
+         s.properties->>'project_id' as project_id,
+         s.properties->'plan_approval' as plan_approval,
+         s.properties->'review_approval' as review_approval,
+         s.properties->'review_rating' as review_rating,
+         proj.title as project_name,
+         prog_da.related_id as program_id,
+         prog.title as program_name,
+         prog.properties->>'color' as program_color
+       FROM documents s
+       LEFT JOIN documents proj ON (s.properties->>'project_id')::uuid = proj.id
+       LEFT JOIN document_associations prog_da ON proj.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+       LEFT JOIN documents prog ON prog_da.related_id = prog.id AND prog.document_type = 'program'
+       WHERE s.workspace_id = $1
+         AND s.document_type = 'sprint'
+         AND jsonb_array_length(COALESCE(s.properties->'assignee_ids', '[]'::jsonb)) > 0
+         AND (s.properties->>'sprint_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Get weekly plans (to check content existence)
+    const plansResult = await pool.query(
+      `SELECT
+         (properties->>'person_id') as person_id,
+         (properties->>'week_number')::int as week_number,
+         id, content
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'weekly_plan'
+         AND deleted_at IS NULL
+         AND (properties->>'week_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Get weekly retros (to check content existence)
+    const retrosResult = await pool.query(
+      `SELECT
+         (properties->>'person_id') as person_id,
+         (properties->>'week_number')::int as week_number,
+         id, content
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'weekly_retro'
+         AND deleted_at IS NULL
+         AND (properties->>'week_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Build plan/retro content maps: personId_weekNumber -> { hasContent, docId }
+    const planContent = new Map<string, { hasContent: boolean; docId: string }>();
+    for (const row of plansResult.rows) {
+      if (row.person_id && row.week_number) {
+        const key = `${row.person_id}_${row.week_number}`;
+        const existing = planContent.get(key);
+        if (!existing || hasContent(row.content)) {
+          planContent.set(key, { hasContent: hasContent(row.content), docId: row.id });
+        }
+      }
+    }
+
+    const retroContent = new Map<string, { hasContent: boolean; docId: string }>();
+    for (const row of retrosResult.rows) {
+      if (row.person_id && row.week_number) {
+        const key = `${row.person_id}_${row.week_number}`;
+        const existing = retroContent.get(key);
+        if (!existing || hasContent(row.content)) {
+          retroContent.set(key, { hasContent: hasContent(row.content), docId: row.id });
+        }
+      }
+    }
+
+    // Build sprint approval map: personId_sprintNumber -> { sprintId, planApproval, reviewApproval, reviewRating, programId, programName }
+    const sprintMap = new Map<string, {
+      sprintId: string;
+      planApproval: unknown;
+      reviewApproval: unknown;
+      reviewRating: unknown;
+      programId: string | null;
+      programName: string | null;
+      programColor: string | null;
+    }>();
+
+    for (const row of sprintsResult.rows) {
+      if (row.person_id && row.sprint_number) {
+        const key = `${row.person_id}_${row.sprint_number}`;
+        sprintMap.set(key, {
+          sprintId: row.sprint_id,
+          planApproval: row.plan_approval || null,
+          reviewApproval: row.review_approval || null,
+          reviewRating: row.review_rating || null,
+          programId: row.program_id || null,
+          programName: row.program_name || null,
+          programColor: row.program_color || null,
+        });
+      }
+    }
+
+    // Build people list with program info from current sprint
+    const people = peopleResult.rows.map((p: { id: string; name: string; reportsTo?: string | null }) => {
+      const currentSprint = sprintMap.get(`${p.id}_${currentSprintNumber}`);
+      return {
+        personId: p.id,
+        name: p.name,
+        programId: currentSprint?.programId || null,
+        programName: currentSprint?.programName || null,
+        programColor: currentSprint?.programColor || null,
+        reportsTo: p.reportsTo || null,
+      };
+    });
+
+    // Build reviews map: personId -> sprintNumber -> cell data
+    const reviews: Record<string, Record<number, {
+      planApproval: unknown;
+      reviewApproval: unknown;
+      reviewRating: unknown;
+      hasPlan: boolean;
+      hasRetro: boolean;
+      sprintId: string | null;
+      planDocId: string | null;
+      retroDocId: string | null;
+    }>> = {};
+
+    for (const person of peopleResult.rows) {
+      const personReviews: Record<number, {
+        planApproval: unknown;
+        reviewApproval: unknown;
+        reviewRating: unknown;
+        hasPlan: boolean;
+        hasRetro: boolean;
+        sprintId: string | null;
+        planDocId: string | null;
+        retroDocId: string | null;
+      }> = {};
+      for (const week of weeks) {
+        const key = `${person.id}_${week.number}`;
+        const sprint = sprintMap.get(key);
+        const contentKey = `${person.id}_${week.number}`;
+        const plan = planContent.get(contentKey);
+        const retro = retroContent.get(contentKey);
+
+        personReviews[week.number] = {
+          planApproval: sprint?.planApproval || null,
+          reviewApproval: sprint?.reviewApproval || null,
+          reviewRating: sprint?.reviewRating || null,
+          hasPlan: plan?.hasContent || false,
+          hasRetro: retro?.hasContent || false,
+          sprintId: sprint?.sprintId || null,
+          planDocId: plan?.docId || null,
+          retroDocId: retro?.docId || null,
+        };
+      }
+      reviews[person.id] = personReviews;
+    }
+
+    res.json({
+      people,
+      weeks,
+      reviews,
+      currentSprintNumber,
+    });
+  } catch (err) {
+    console.error('Get team reviews error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/team/accountability-grid-v3 - Person-centric plan/retro status (like Allocation view)
+// Returns: { programs: [{ people: [{ weeks }] }], weeks, currentSprintNumber }
+// Groups people by their current week's allocation's program
+// Each person's week shows plan/retro status for their allocated project
+router.get('/accountability-grid-v3', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const workspaceId = req.workspaceId!;
+    const showArchived = req.query.showArchived === 'true';
+
+    // Check if user is admin
+    const { isAdmin } = await getVisibilityContext(userId, workspaceId);
+    if (!isAdmin) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    const cacheKey = `${workspaceId}:${showArchived}`;
+    const cached = accountabilityGridCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      res.type('application/json').send(cached.body);
+      return;
+    }
+
+    // Get workspace sprint config
+    const workspaceResult = await pool.query(
+      `SELECT sprint_start_date FROM workspaces WHERE id = $1`,
+      [workspaceId]
+    );
+
+    if (workspaceResult.rows.length === 0) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const rawSprintStartDate = workspaceResult.rows[0]?.sprint_start_date;
+    const sprintDurationDays = 7;
+    const today = new Date();
+
+    let sprintStartDate: Date;
+    if (rawSprintStartDate instanceof Date) {
+      sprintStartDate = new Date(Date.UTC(rawSprintStartDate.getFullYear(), rawSprintStartDate.getMonth(), rawSprintStartDate.getDate()));
+    } else if (typeof rawSprintStartDate === 'string') {
+      sprintStartDate = new Date(rawSprintStartDate + 'T00:00:00Z');
+    } else {
+      sprintStartDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    }
+
+    // Calculate current sprint number
+    const daysSinceStart = Math.floor((today.getTime() - sprintStartDate.getTime()) / (1000 * 60 * 60 * 24));
+    const currentSprintNumber = Math.max(1, Math.floor(daysSinceStart / sprintDurationDays) + 1);
+
+    // Get sprint range (last 6 sprints + current + next 2)
+    const fromSprint = Math.max(1, currentSprintNumber - 6);
+    const toSprint = currentSprintNumber + 2;
+
+    // Generate weeks array
+    const weeks: { number: number; name: string; startDate: string; endDate: string; isCurrent: boolean }[] = [];
+    for (let i = fromSprint; i <= toSprint; i++) {
+      const weekStart = new Date(sprintStartDate);
+      weekStart.setUTCDate(weekStart.getUTCDate() + (i - 1) * sprintDurationDays);
+      const weekEnd = new Date(weekStart);
+      weekEnd.setUTCDate(weekEnd.getUTCDate() + sprintDurationDays - 1);
+
+      weeks.push({
+        number: i,
+        name: `Week ${i}`,
+        startDate: weekStart.toISOString().split('T')[0] || '',
+        endDate: weekEnd.toISOString().split('T')[0] || '',
+        isCurrent: i === currentSprintNumber,
+      });
+    }
+
+    // Get all workspace people
+    const peopleResult = await pool.query(
+      `SELECT id, title as name
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'person'
+         AND ($2 OR archived_at IS NULL)
+       ORDER BY title`,
+      [workspaceId, showArchived]
+    );
+
+    // Get all programs
+    const programsResult = await pool.query(
+      `SELECT id, title as name, properties->>'color' as color
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'program'
+         AND archived_at IS NULL
+       ORDER BY title`,
+      [workspaceId]
+    );
+
+    // Get explicit sprint assignments (person -> sprint -> project)
+    const explicitAssignmentsResult = await pool.query(
+      `SELECT
+         jsonb_array_elements_text(s.properties->'assignee_ids') as person_id,
+         (s.properties->>'sprint_number')::int as sprint_number,
+         s.properties->>'project_id' as project_id,
+         s.properties->'plan_approval'->>'state' as plan_approval_state,
+         s.properties->'review_approval'->>'state' as review_approval_state,
+         proj.title as project_name,
+         proj.properties->>'color' as project_color,
+         prog_da.related_id as program_id,
+         prog.title as program_name,
+         prog.properties->>'color' as program_color
+       FROM documents s
+       LEFT JOIN documents proj ON (s.properties->>'project_id')::uuid = proj.id
+       LEFT JOIN document_associations prog_da ON proj.id = prog_da.document_id AND prog_da.relationship_type = 'program'
+       LEFT JOIN documents prog ON prog_da.related_id = prog.id AND prog.document_type = 'program'
+       WHERE s.workspace_id = $1
+         AND s.document_type = 'sprint'
+         AND s.archived_at IS NULL
+         AND s.deleted_at IS NULL
+         AND (s.properties->>'sprint_number')::int BETWEEN $2 AND $3
+         AND jsonb_array_length(COALESCE(s.properties->'assignee_ids', '[]'::jsonb)) > 0`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Build assignments map: personId -> sprintNumber -> assignment
+    const assignments: Record<string, Record<number, {
+      projectId: string | null;
+      projectName: string | null;
+      projectColor: string | null;
+      programId: string | null;
+      programName: string | null;
+      programColor: string | null;
+      planApprovalState: string | null;
+      reviewApprovalState: string | null;
+    }>> = {};
+
+    for (const row of explicitAssignmentsResult.rows) {
+      const personId = row.person_id;
+      const sprintNumber = row.sprint_number;
+      if (!personId || !sprintNumber) continue;
+
+      if (!assignments[personId]) {
+        assignments[personId] = {};
+      }
+      assignments[personId][sprintNumber] = {
+        projectId: row.project_id,
+        projectName: row.project_name,
+        projectColor: row.project_color,
+        programId: row.program_id,
+        programName: row.program_name,
+        programColor: row.program_color,
+        planApprovalState: row.plan_approval_state || null,
+        reviewApprovalState: row.review_approval_state || null,
+      };
+    }
+
+    // Infer assignments from issues (fallback for people without explicit assignments)
+    const issuesResult = await pool.query(
+      `SELECT
+         i.properties->>'assignee_id' as assignee_id,
+         da_project.related_id as project_id,
+         proj.title as project_name,
+         proj.properties->>'color' as project_color,
+         proj_prog_da.related_id as program_id,
+         prog.title as program_name,
+         prog.properties->>'color' as program_color,
+         (s.properties->>'sprint_number')::int as sprint_number
+       FROM documents i
+       JOIN document_associations da_sprint ON da_sprint.document_id = i.id AND da_sprint.relationship_type = 'sprint'
+       JOIN documents s ON s.id = da_sprint.related_id
+       JOIN document_associations da_project ON da_project.document_id = i.id AND da_project.relationship_type = 'project'
+       JOIN documents proj ON proj.id = da_project.related_id
+       LEFT JOIN document_associations proj_prog_da ON proj.id = proj_prog_da.document_id AND proj_prog_da.relationship_type = 'program'
+       LEFT JOIN documents prog ON proj_prog_da.related_id = prog.id AND prog.document_type = 'program'
+       WHERE i.workspace_id = $1
+         AND i.document_type = 'issue'
+         AND i.archived_at IS NULL
+         AND i.deleted_at IS NULL
+         AND s.archived_at IS NULL
+         AND s.deleted_at IS NULL
+         AND i.properties->>'assignee_id' IS NOT NULL
+         AND (s.properties->>'sprint_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Count issues per person+sprint+project to infer primary project
+    const projectCounts: Record<string, Record<number, Record<string, {
+      count: number;
+      projectId: string;
+      projectName: string;
+      projectColor: string | null;
+      programId: string | null;
+      programName: string | null;
+      programColor: string | null;
+    }>>> = {};
+
+    for (const issue of issuesResult.rows) {
+      const personId = issue.assignee_id;
+      const sprintNumber = issue.sprint_number;
+      const projectId = issue.project_id;
+
+      if (!personId || !projectId || !sprintNumber) continue;
+      if (assignments[personId]?.[sprintNumber]) continue; // Skip if explicit assignment exists
+
+      if (!projectCounts[personId]) projectCounts[personId] = {};
+      if (!projectCounts[personId][sprintNumber]) projectCounts[personId][sprintNumber] = {};
+      if (!projectCounts[personId][sprintNumber][projectId]) {
+        projectCounts[personId][sprintNumber][projectId] = {
+          count: 0,
+          projectId,
+          projectName: issue.project_name,
+          projectColor: issue.project_color,
+          programId: issue.program_id,
+          programName: issue.program_name,
+          programColor: issue.program_color,
+        };
+      }
+      projectCounts[personId][sprintNumber][projectId].count++;
+    }
+
+    // Add inferred assignments
+    for (const [personId, sprints] of Object.entries(projectCounts)) {
+      if (!assignments[personId]) assignments[personId] = {};
+      for (const [sprintNumStr, projects] of Object.entries(sprints)) {
+        const sprintNum = parseInt(sprintNumStr, 10);
+        if (assignments[personId][sprintNum]) continue;
+
+        let maxCount = 0;
+        let primaryProject: (typeof projects)[string] | null = null;
+        for (const proj of Object.values(projects)) {
+          if (proj.count > maxCount) {
+            maxCount = proj.count;
+            primaryProject = proj;
+          }
+        }
+        if (primaryProject) {
+          assignments[personId][sprintNum] = {
+            projectId: primaryProject.projectId,
+            projectName: primaryProject.projectName,
+            projectColor: primaryProject.projectColor,
+            programId: primaryProject.programId,
+            programName: primaryProject.programName,
+            programColor: primaryProject.programColor,
+            planApprovalState: null,
+            reviewApprovalState: null,
+          };
+        }
+      }
+    }
+
+    // Get ALL weekly plans in the workspace for the week range
+    const plansResult = await pool.query(
+      `SELECT
+         (properties->>'person_id') as person_id,
+         (properties->>'project_id') as project_id,
+         (properties->>'week_number')::int as week_number,
+         id,
+         content
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'weekly_plan'
+         AND deleted_at IS NULL
+         AND (properties->>'week_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Get ALL weekly retros in the workspace for the week range
+    const retrosResult = await pool.query(
+      `SELECT
+         (properties->>'person_id') as person_id,
+         (properties->>'project_id') as project_id,
+         (properties->>'week_number')::int as week_number,
+         id,
+         content
+       FROM documents
+       WHERE workspace_id = $1
+         AND document_type = 'weekly_retro'
+         AND deleted_at IS NULL
+         AND (properties->>'week_number')::int BETWEEN $2 AND $3`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    const calculateStatus = (
+      docId: string | null,
+      docContent: unknown,
+      weekStartDate: Date,
+      type: 'plan' | 'retro',
+      approvalState: string | null
+    ): 'done' | 'due' | 'late' | 'future' | 'changes_requested' => {
+      if (approvalState === 'changes_requested') return 'changes_requested';
+      if (docId && hasContent(docContent)) return 'done';
+
+      const now = new Date();
+      now.setUTCHours(0, 0, 0, 0);
+
+      if (type === 'plan') {
+        // Plan: yellow (due) from Saturday (weekStart - 2) through end-of-day Monday
+        // Red (late) from Tuesday morning (weekStart + 1) onward
+        const yellowStart = new Date(weekStartDate);
+        yellowStart.setUTCDate(yellowStart.getUTCDate() - 2);
+        const redStart = new Date(weekStartDate);
+        redStart.setUTCDate(redStart.getUTCDate() + 1);
+        if (now < yellowStart) return 'future';
+        if (now >= redStart) return 'late';
+        return 'due';
+      } else {
+        // Retro: yellow (due) from Thursday (weekStart + 3) through end-of-day Friday
+        // Red (late) from Saturday morning (weekStart + 5) onward
+        const yellowStart = new Date(weekStartDate);
+        yellowStart.setUTCDate(yellowStart.getUTCDate() + 3);
+        const redStart = new Date(weekStartDate);
+        redStart.setUTCDate(redStart.getUTCDate() + 5);
+        if (now < yellowStart) return 'future';
+        if (now >= redStart) return 'late';
+        return 'due';
+      }
+    };
+
+    // Build plan/retro maps: `${projectId}_${personId}_${weekNumber}` -> { id, content }
+    const plans = new Map<string, { id: string; content: unknown }>();
+    for (const row of plansResult.rows) {
+      plans.set(`${row.project_id}_${row.person_id}_${row.week_number}`, { id: row.id, content: row.content });
+    }
+
+    const retros = new Map<string, { id: string; content: unknown }>();
+    for (const row of retrosResult.rows) {
+      retros.set(`${row.project_id}_${row.person_id}_${row.week_number}`, { id: row.id, content: row.content });
+    }
+
+    // Build person data: for each week, get their allocation and corresponding plan/retro status
+    const buildPersonWeeks = (personId: string) => {
+      return Object.fromEntries(
+        weeks.map(week => {
+          const allocation = assignments[personId]?.[week.number];
+          const projectId = allocation?.projectId;
+
+          // Get plan/retro for this person's allocated project
+          const planData = projectId ? plans.get(`${projectId}_${personId}_${week.number}`) : null;
+          const retroData = projectId ? retros.get(`${projectId}_${personId}_${week.number}`) : null;
+          const weekStartDate = new Date(week.startDate);
+          const planApprovalState = allocation?.planApprovalState || null;
+          const reviewApprovalState = allocation?.reviewApprovalState || null;
+
+          return [
+            week.number,
+            {
+              projectId: projectId || null,
+              projectName: allocation?.projectName || null,
+              projectColor: allocation?.projectColor || null,
+              planId: planData?.id || null,
+              planStatus: projectId ? calculateStatus(planData?.id || null, planData?.content, weekStartDate, 'plan', planApprovalState) : null,
+              retroId: retroData?.id || null,
+              retroStatus: projectId ? calculateStatus(retroData?.id || null, retroData?.content, weekStartDate, 'retro', reviewApprovalState) : null,
+            },
+          ];
+        })
+      );
+    };
+
+    // Group people by their current week's allocation's program
+    const programGroups = new Map<string, {
+      id: string;
+      name: string;
+      color: string;
+      people: Array<{ id: string; name: string; weeks: Record<number, unknown> }>;
+    }>();
+
+    // Initialize all programs
+    for (const prog of programsResult.rows) {
+      programGroups.set(prog.id, {
+        id: prog.id,
+        name: prog.name,
+        color: prog.color || '#6b7280',
+        people: [],
+      });
+    }
+
+    // Add "No Program" group
+    programGroups.set('unassigned', {
+      id: 'unassigned',
+      name: 'No Program',
+      color: '#6b7280',
+      people: [],
+    });
+
+    // Assign each person to a program based on current week's allocation
+    for (const person of peopleResult.rows) {
+      const currentAllocation = assignments[person.id]?.[currentSprintNumber];
+      const programId = currentAllocation?.programId || 'unassigned';
+
+      const personData = {
+        id: person.id,
+        name: person.name,
+        weeks: buildPersonWeeks(person.id),
+      };
+
+      if (programGroups.has(programId)) {
+        programGroups.get(programId)!.people.push(personData);
+      } else {
+        // Program doesn't exist (maybe archived), add to unassigned
+        programGroups.get('unassigned')!.people.push(personData);
+      }
+    }
+
+    // Filter out empty programs and convert to array
+    const programs = Array.from(programGroups.values()).filter(p => p.people.length > 0);
+
+    const body = JSON.stringify({
+      programs,
+      weeks,
+      currentSprintNumber,
+    });
+    accountabilityGridCache.set(cacheKey, {
+      expiresAt: Date.now() + ACCOUNTABILITY_GRID_CACHE_TTL_MS,
+      body,
+    });
+    res.type('application/json').send(body);
+  } catch (err) {
+    console.error('Get accountability grid v3 error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/team/accountability-grid - Get accountability grid data (hypothesis/review status)
+// Returns: { sprints, projects, sprintAccountability } for admin accountability view
+router.get('/accountability-grid', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const workspaceId = req.workspaceId!;
+
+    // Check if user is admin
+    const { isAdmin } = await getVisibilityContext(userId, workspaceId);
+    if (!isAdmin) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    // Get workspace sprint start date
+    const workspaceResult = await pool.query(
+      `SELECT sprint_start_date FROM workspaces WHERE id = $1`,
+      [workspaceId]
+    );
+
+    const rawSprintStartDate = workspaceResult.rows[0]?.sprint_start_date;
+    const sprintDurationDays = 7;
+    const today = new Date();
+
+    let startDate: Date;
+    if (rawSprintStartDate instanceof Date) {
+      startDate = new Date(Date.UTC(rawSprintStartDate.getFullYear(), rawSprintStartDate.getMonth(), rawSprintStartDate.getDate()));
+    } else if (typeof rawSprintStartDate === 'string') {
+      startDate = new Date(rawSprintStartDate + 'T00:00:00Z');
+    } else {
+      startDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+    }
+
+    // Calculate current sprint number
+    const daysSinceStart = Math.floor((today.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24));
+    const currentSprintNumber = Math.max(1, Math.floor(daysSinceStart / sprintDurationDays) + 1);
+
+    // Get sprint range (last 6 sprints + current + next 2)
+    const fromSprint = Math.max(1, currentSprintNumber - 6);
+    const toSprint = currentSprintNumber + 2;
+
+    // Generate sprint info
+    const sprintRange = [];
+    for (let i = fromSprint; i <= toSprint; i++) {
+      const sprintStart = new Date(startDate);
+      sprintStart.setUTCDate(sprintStart.getUTCDate() + (i - 1) * sprintDurationDays);
+      const sprintEnd = new Date(sprintStart);
+      sprintEnd.setUTCDate(sprintEnd.getUTCDate() + sprintDurationDays - 1);
+
+      sprintRange.push({
+        number: i,
+        name: `Week ${i}`,
+        startDate: sprintStart.toISOString().split('T')[0],
+        endDate: sprintEnd.toISOString().split('T')[0],
+        isCurrent: i === currentSprintNumber,
+      });
+    }
+
+    // Get all sprint documents with their accountability data
+    const sprintsResult = await pool.query(
+      `SELECT
+         d.id,
+         d.title,
+         d.properties->>'sprint_number' as sprint_number,
+         d.properties->'plan_approval' as plan_approval,
+         d.properties->'review_approval' as review_approval,
+         EXISTS(
+           SELECT 1 FROM documents wp
+           WHERE wp.document_type = 'weekly_plan'
+           AND (wp.properties->>'week_number')::int = (d.properties->>'sprint_number')::int
+           AND wp.workspace_id = $1
+           AND wp.deleted_at IS NULL
+         ) as has_plan,
+         EXISTS(
+           SELECT 1 FROM documents sr
+           WHERE sr.document_type = 'weekly_review'
+           AND sr.properties->>'sprint_id' = d.id::text
+           AND sr.archived_at IS NULL
+         ) as has_review
+       FROM documents d
+       WHERE d.workspace_id = $1
+         AND d.document_type = 'sprint'
+         AND d.archived_at IS NULL
+         AND (d.properties->>'sprint_number')::int BETWEEN $2 AND $3
+       ORDER BY (d.properties->>'sprint_number')::int`,
+      [workspaceId, fromSprint, toSprint]
+    );
+
+    // Build sprint accountability map: sprintNumber -> accountability data
+    const sprintAccountability: Record<number, {
+      id: string;
+      title: string;
+      hasPlan: boolean;
+      planApproval: { state: string | null } | null;
+      hasReview: boolean;
+      reviewApproval: { state: string | null } | null;
+    }> = {};
+
+    for (const sprint of sprintsResult.rows) {
+      const sprintNumber = parseInt(sprint.sprint_number, 10);
+      sprintAccountability[sprintNumber] = {
+        id: sprint.id,
+        title: sprint.title,
+        hasPlan: sprint.has_plan === true || sprint.has_plan === 't',
+        planApproval: sprint.plan_approval,
+        hasReview: sprint.has_review === true,
+        reviewApproval: sprint.review_approval,
+      };
+    }
+
+    // Get all active projects with their program info and accountability data
+    const projectsResult = await pool.query(
+      `SELECT
+         p.id,
+         p.title,
+         p.properties->>'color' as color,
+         p.properties->>'emoji' as emoji,
+         p.content as plan_content,
+         p.properties->'plan_approval' as plan_approval,
+         p.properties->'retro_approval' as retro_approval,
+         prog.id as program_id,
+         prog.title as program_name,
+         prog.properties->>'color' as program_color,
+         prog.properties->>'emoji' as program_emoji,
+         EXISTS(
+           SELECT 1 FROM documents r
+           WHERE r.document_type = 'wiki'
+           AND r.parent_id = p.id
+           AND r.title ILIKE '%retro%'
+           AND r.archived_at IS NULL
+         ) as has_retro
+       FROM documents p
+       LEFT JOIN document_associations da_prog ON da_prog.document_id = p.id AND da_prog.relationship_type = 'program'
+       LEFT JOIN documents prog ON prog.id = da_prog.related_id
+       WHERE p.workspace_id = $1
+         AND p.document_type = 'project'
+         AND p.archived_at IS NULL
+       ORDER BY prog.title NULLS LAST, p.title`,
+      [workspaceId]
+    );
+
+    // Sprint allocations feature not yet implemented in unified document model
+    // TODO: Derive allocations from issue assignments (issues assigned to both project and sprint)
+    // For now, return empty allocations so the endpoint works
+    const projectAllocations: Record<string, Record<number, number>> = {};
+
+    // Build projects array with accountability data
+    const projects = projectsResult.rows.map(p => {
+      // Check if project has plan (non-empty content)
+      let hasPlan = false;
+      if (p.plan_content) {
+        const content = typeof p.plan_content === 'string'
+          ? JSON.parse(p.plan_content)
+          : p.plan_content;
+        // Check if content has any text
+        if (content?.content) {
+          hasPlan = JSON.stringify(content.content).length > 50; // Reasonable threshold for "has content"
+        }
+      }
+
+      return {
+        id: p.id,
+        title: p.title,
+        color: p.color || p.program_color || '#6b7280',
+        emoji: p.emoji,
+        programId: p.program_id,
+        programName: p.program_name,
+        programColor: p.program_color,
+        programEmoji: p.program_emoji,
+        hasPlan,
+        planApproval: p.plan_approval,
+        hasRetro: p.has_retro === true,
+        retroApproval: p.retro_approval,
+        allocations: projectAllocations[p.id] || {},
+      };
+    });
+
+    res.json({
+      weeks: sprintRange,
+      currentSprintNumber,
+      sprintAccountability,
+      projects,
+    });
+  } catch (err) {
+    console.error('Get accountability grid error:', err);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

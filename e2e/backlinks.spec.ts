@@ -1,4 +1,5 @@
 import { test, expect, Page } from './fixtures/isolated-env'
+import { triggerMentionPopup } from './fixtures/test-helpers'
 
 /**
  * Backlinks E2E Tests
@@ -19,7 +20,7 @@ async function login(page: Page) {
 async function createNewDocument(page: Page) {
   await page.goto('/docs')
   await page.getByRole('button', { name: 'New Document', exact: true }).click()
-  await expect(page).toHaveURL(/\/docs\/[a-f0-9-]+/, { timeout: 10000 })
+  await expect(page).toHaveURL(/\/documents\/[a-f0-9-]+/, { timeout: 10000 })
   await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
   return page.url()
 }
@@ -66,48 +67,44 @@ test.describe('Backlinks', () => {
     await setDocumentTitle(page, 'Document B')
 
     const editor = page.locator('.ProseMirror')
-    await editor.click()
+    await triggerMentionPopup(page, editor)
 
-    // Create mention to Document A
-    await page.keyboard.type('@Document A')
+    // Type search term to filter
+    await page.keyboard.type('Document A')
     await page.waitForTimeout(500)
 
-    // Wait for mention popup
-    const mentionPopup = page.locator('[role="listbox"]')
-    if (await mentionPopup.isVisible({ timeout: 3000 })) {
-      // Select Document A from list
-      const docAOption = page.locator('[role="option"]').filter({ hasText: 'Document A' })
-      if (await docAOption.isVisible()) {
-        await docAOption.click()
-        await page.waitForTimeout(1000)
+    // Select Document A from list
+    const docAOption = page.locator('[role="option"]').filter({ hasText: 'Document A' })
+    await expect(docAOption).toBeVisible({ timeout: 5000 })
+    await docAOption.click()
+    await page.waitForTimeout(1000)
 
-        // Navigate to Document A
-        await page.goto(docAUrl)
-        await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-        await page.waitForTimeout(1000)
+    // Navigate to Document A
+    await page.goto(docAUrl)
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        // Document A should now show Document B in backlinks
-        // Scope to properties sidebar to avoid matching sidebar doc list
-        const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
-        await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
+    // Reload to ensure backlinks are fetched fresh
+    await page.reload()
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        const backlinksPanel = propertiesSidebar.locator('text="Backlinks"').or(
-          propertiesSidebar.locator('text="Referenced by"')
-        ).or(
-          propertiesSidebar.locator('[data-backlinks-panel]')
-        ).first()
+    // Document A should now show Document B in backlinks
+    // Scope to properties sidebar to avoid matching sidebar doc list
+    const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
+    await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
 
-        await expect(backlinksPanel).toBeVisible({ timeout: 3000 })
+    const backlinksPanel = propertiesSidebar.locator('text="Backlinks"').or(
+      propertiesSidebar.locator('text="Referenced by"')
+    ).or(
+      propertiesSidebar.locator('[data-backlinks-panel]')
+    ).first()
 
-        // Look for Document B in backlinks (within properties sidebar)
-        const hasDocB = await propertiesSidebar.locator('text="Document B"').isVisible({ timeout: 3000 })
-        expect(hasDocB).toBeTruthy()
-      } else {
-        expect(true).toBe(false) // Element not found, test cannot continue
-      }
-    } else {
-      expect(true).toBe(false) // Element not found, test cannot continue
-    }
+    await expect(backlinksPanel).toBeVisible({ timeout: 3000 })
+
+    // Look for Document B in backlinks (within properties sidebar)
+    const hasDocB = await propertiesSidebar.locator('text="Document B"').isVisible({ timeout: 5000 })
+    expect(hasDocB).toBeTruthy()
   })
 
   test('removing mention removes backlink', async ({ page }) => {
@@ -120,76 +117,66 @@ test.describe('Backlinks', () => {
     await setDocumentTitle(page, 'Doc with Mention')
 
     const editor = page.locator('.ProseMirror')
-    await editor.click()
+    await triggerMentionPopup(page, editor)
 
-    // Create mention to Document A
-    await page.keyboard.type('@Doc to Mention')
+    await page.keyboard.type('Doc to Mention')
     await page.waitForTimeout(500)
 
-    const mentionPopup = page.locator('[role="listbox"]')
-    if (await mentionPopup.isVisible({ timeout: 3000 })) {
-      const docOption = page.locator('[role="option"]').filter({ hasText: 'Doc to Mention' })
-      if (await docOption.isVisible()) {
-        await docOption.click()
-        await page.waitForTimeout(1000)
+    const docOption = page.locator('[role="option"]').filter({ hasText: 'Doc to Mention' })
+    await expect(docOption).toBeVisible({ timeout: 5000 })
+    await docOption.click()
+    await page.waitForTimeout(1000)
 
-        // Delete the mention by selecting all content and deleting it
-        // NOTE: Can't click on .mention directly because MentionExtension's click handler
-        // calls onNavigate() which navigates away from the page.
-        // Instead, use keyboard shortcuts to select all and delete.
-        const mention = editor.locator('.mention')
-        await expect(mention).toBeVisible({ timeout: 3000 })
+    // Delete the mention by selecting all content and deleting it
+    // NOTE: Can't click on .mention directly because MentionExtension's click handler
+    // calls onNavigate() which navigates away from the page.
+    // Instead, use keyboard shortcuts to select all and delete.
+    const mention = editor.locator('.mention')
+    await expect(mention).toBeVisible({ timeout: 3000 })
 
-        // Focus the editor and select all content
-        await editor.click()
-        await page.keyboard.press('Meta+a') // Select all (Cmd+A on Mac)
-        await page.keyboard.press('Backspace') // Delete selected content
+    // Focus the editor and select all content
+    await editor.click()
+    await page.keyboard.press('Meta+a') // Select all (Cmd+A on Mac)
+    await page.keyboard.press('Backspace') // Delete selected content
 
-        // Wait for editor update to propagate (debounce is 500ms)
-        await page.waitForTimeout(1000)
+    // Wait for editor update to propagate (debounce is 500ms)
+    await page.waitForTimeout(1000)
 
-        // Verify mention is deleted before waiting for POST
-        await expect(editor.locator('.mention')).not.toBeVisible({ timeout: 3000 })
+    // Verify mention is deleted before waiting for POST
+    await expect(editor.locator('.mention')).not.toBeVisible({ timeout: 3000 })
 
-        // Wait for the link sync POST request (debounced 500ms)
-        const linkSyncResponse = await page.waitForResponse(
-          resp => resp.url().includes('/links') && resp.request().method() === 'POST',
-          { timeout: 5000 }
-        ).catch((err) => {
-          console.log('No /links POST detected after mention removal:', err.message)
-          return null
-        })
+    // Wait for the link sync POST request (debounced 500ms)
+    await page.waitForResponse(
+      resp => resp.url().includes('/links') && resp.request().method() === 'POST',
+      { timeout: 5000 }
+    ).catch((err) => {
+      console.log('No /links POST detected after mention removal:', err.message)
+    })
 
-        // Extra wait for sync to propagate
-        await page.waitForTimeout(1500)
+    // Extra wait for sync to propagate
+    await page.waitForTimeout(1500)
 
-        // Navigate to Document A and reload to ensure fresh backlinks data
-        await page.goto(docAUrl)
-        await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-        await page.waitForTimeout(500)
+    // Navigate to Document A and reload to ensure fresh backlinks data
+    await page.goto(docAUrl)
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(500)
 
-        // Reload to ensure backlinks are fetched fresh from server
-        await page.reload()
-        await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-        await page.waitForTimeout(1000)
+    // Reload to ensure backlinks are fetched fresh from server
+    await page.reload()
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        // Document A should NOT show Document B in backlinks (or show empty state)
-        // Look within the properties sidebar for backlinks
-        const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
-        await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
+    // Document A should NOT show Document B in backlinks (or show empty state)
+    // Look within the properties sidebar for backlinks
+    const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
+    await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
 
-        // Should either show "No backlinks" or not have "Doc with Mention" in the backlinks section
-        const hasNoBacklinks = await propertiesSidebar.locator('text="No backlinks"').isVisible({ timeout: 2000 })
-        const hasDocWithMention = await propertiesSidebar.locator('text="Doc with Mention"').isVisible({ timeout: 2000 })
+    // Should either show "No backlinks" or not have "Doc with Mention" in the backlinks section
+    const hasNoBacklinks = await propertiesSidebar.locator('text="No backlinks"').isVisible({ timeout: 2000 })
+    const hasDocWithMention = await propertiesSidebar.locator('text="Doc with Mention"').isVisible({ timeout: 2000 })
 
-        // Either "No backlinks" is shown, OR the doc is not in the backlinks
-        expect(hasNoBacklinks || !hasDocWithMention).toBeTruthy()
-      } else {
-        expect(true).toBe(false) // Element not found, test cannot continue
-      }
-    } else {
-      expect(true).toBe(false) // Element not found, test cannot continue
-    }
+    // Either "No backlinks" is shown, OR the doc is not in the backlinks
+    expect(hasNoBacklinks || !hasDocWithMention).toBeTruthy()
   })
 
   test('backlinks show correct document info', async ({ page }) => {
@@ -202,49 +189,42 @@ test.describe('Backlinks', () => {
     await setDocumentTitle(page, 'Referencing Document')
 
     const editor = page.locator('.ProseMirror')
-    await editor.click()
+    await triggerMentionPopup(page, editor)
 
-    // Mention Target Document
-    await page.keyboard.type('@Target Document')
+    await page.keyboard.type('Target Document')
     await page.waitForTimeout(500)
 
-    const mentionPopup = page.locator('[role="listbox"]')
-    if (await mentionPopup.isVisible({ timeout: 3000 })) {
-      const docOption = page.locator('[role="option"]').filter({ hasText: 'Target Document' })
-      if (await docOption.isVisible()) {
-        await docOption.click()
-        await page.waitForTimeout(1000)
+    const docOption = page.locator('[role="option"]').filter({ hasText: 'Target Document' })
+    await expect(docOption).toBeVisible({ timeout: 5000 })
+    await docOption.click()
+    await page.waitForTimeout(1000)
 
-        // Navigate to Target Document
-        await page.goto(docXUrl)
-        await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-        await page.waitForTimeout(1000)
+    // Navigate to Target Document
+    await page.goto(docXUrl)
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        // Check backlinks panel shows correct info
-        // Scope to properties sidebar to avoid matching sidebar doc list
-        const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
-        await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
+    // Reload to ensure backlinks are fetched fresh
+    await page.reload()
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        const backlinksPanel = propertiesSidebar.locator('text="Backlinks"').or(
-          propertiesSidebar.locator('text="Referenced by"')
-        ).or(
-          propertiesSidebar.locator('[data-backlinks-panel]')
-        ).first()
+    // Check backlinks panel shows correct info
+    // Scope to properties sidebar to avoid matching sidebar doc list
+    const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
+    await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
 
-        await expect(backlinksPanel).toBeVisible({ timeout: 3000 })
+    const backlinksPanel = propertiesSidebar.locator('text="Backlinks"').or(
+      propertiesSidebar.locator('text="Referenced by"')
+    ).or(
+      propertiesSidebar.locator('[data-backlinks-panel]')
+    ).first()
 
-        // Should show "Referencing Document" with document icon or title (within properties sidebar)
-        const backlink = propertiesSidebar.locator('text="Referencing Document"')
-        await expect(backlink).toBeVisible({ timeout: 3000 })
+    await expect(backlinksPanel).toBeVisible({ timeout: 3000 })
 
-        // Optionally check for document icon or type indicator
-        // This depends on implementation
-      } else {
-        expect(true).toBe(false) // Element not found, test cannot continue
-      }
-    } else {
-      expect(true).toBe(false) // Element not found, test cannot continue
-    }
+    // Should show "Referencing Document" with document icon or title (within properties sidebar)
+    const backlink = propertiesSidebar.locator('text="Referencing Document"')
+    await expect(backlink).toBeVisible({ timeout: 5000 })
   })
 
   test('clicking backlink navigates to source document', async ({ page }) => {
@@ -264,64 +244,51 @@ test.describe('Backlinks', () => {
     await setDocumentTitle(page, 'Source Doc')
 
     const editor = page.locator('.ProseMirror')
-    await editor.click()
+    await triggerMentionPopup(page, editor)
 
-    // Mention Document M
-    await page.keyboard.type('@Mentioned Doc')
+    await page.keyboard.type('Mentioned Doc')
     await page.waitForTimeout(500)
 
-    const mentionPopup = page.locator('[role="listbox"]')
-    if (await mentionPopup.isVisible({ timeout: 3000 })) {
-      const docOption = page.locator('[role="option"]').filter({ hasText: 'Mentioned Doc' })
-      if (await docOption.isVisible()) {
-        await docOption.click()
+    const docOption = page.locator('[role="option"]').filter({ hasText: 'Mentioned Doc' })
+    await expect(docOption).toBeVisible({ timeout: 5000 })
+    await docOption.click()
 
-        // Wait for the link sync POST request (debounced 500ms)
-        await page.waitForResponse(
-          resp => resp.url().includes('/links') && resp.request().method() === 'POST',
-          { timeout: 5000 }
-        ).catch(() => console.log('No /links POST detected'))
+    // Wait for the link sync POST request (debounced 500ms)
+    await page.waitForResponse(
+      resp => resp.url().includes('/links') && resp.request().method() === 'POST',
+      { timeout: 5000 }
+    ).catch(() => console.log('No /links POST detected'))
 
-        // Wait for any pending syncs
-        await page.waitForTimeout(1000)
+    // Wait for any pending syncs
+    await page.waitForTimeout(1000)
 
-        // Navigate to Mentioned Doc and reload to ensure fresh backlinks data
-        await page.goto(docMUrl)
-        await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-        await page.waitForTimeout(1000)
+    // Navigate to Mentioned Doc and reload to ensure fresh backlinks data
+    await page.goto(docMUrl)
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        // Reload to ensure backlinks are fetched fresh from server
-        await page.reload()
-        await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-        await page.waitForTimeout(1000)
+    // Reload to ensure backlinks are fetched fresh from server
+    await page.reload()
+    await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
+    await page.waitForTimeout(1000)
 
-        // Find backlink to Source Doc in the properties sidebar and click it
-        const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
-        await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
+    // Find backlink to Source Doc in the properties sidebar and click it
+    const propertiesSidebar = page.locator('aside[aria-label="Document properties"]')
+    await expect(propertiesSidebar).toBeVisible({ timeout: 3000 })
 
-        // Look for "Source Doc" link within the properties sidebar
-        const sourceLinkInBacklinks = propertiesSidebar.locator('text="Source Doc"')
+    // Look for "Source Doc" link within the properties sidebar
+    const sourceLinkInBacklinks = propertiesSidebar.locator('text="Source Doc"')
+    await expect(sourceLinkInBacklinks.first()).toBeVisible({ timeout: 5000 })
+    await sourceLinkInBacklinks.first().click()
+    await page.waitForTimeout(1000)
 
-        if (await sourceLinkInBacklinks.first().isVisible({ timeout: 3000 })) {
-          await sourceLinkInBacklinks.first().click()
-          await page.waitForTimeout(1000)
+    // Should navigate to Source Doc (Document N)
+    expect(page.url()).toContain(docNUrl.split('/').pop()!)
 
-          // Should navigate to Source Doc (Document N)
-          expect(page.url()).toContain(docNUrl.split('/').pop()!)
-
-          // Verify we're on Source Doc page
-          const titleInput = page.getByPlaceholder('Untitled')
-          const title = await titleInput.inputValue()
-          expect(title).toBe('Source Doc')
-        } else {
-          expect(true).toBe(false) // Element not found, test cannot continue
-        }
-      } else {
-        expect(true).toBe(false) // Element not found, test cannot continue
-      }
-    } else {
-      expect(true).toBe(false) // Element not found, test cannot continue
-    }
+    // Verify we're on Source Doc page
+    const titleInput = page.getByPlaceholder('Untitled')
+    const title = await titleInput.inputValue()
+    expect(title).toBe('Source Doc')
   })
 
   test('backlinks update in real-time', async ({ page, browser }) => {
@@ -339,8 +306,12 @@ test.describe('Backlinks', () => {
 
     // Create Document Q in second tab
     await page2.goto('/docs')
+    // Wait for page to stabilize and dismiss any modal that might be open
+    await page2.waitForTimeout(500)
+    await page2.keyboard.press('Escape')
+    await page2.waitForTimeout(300)
     await page2.getByRole('button', { name: 'New Document', exact: true }).click()
-    await expect(page2).toHaveURL(/\/docs\/[a-f0-9-]+/, { timeout: 10000 })
+    await expect(page2).toHaveURL(/\/documents\/[a-f0-9-]+/, { timeout: 10000 })
     await expect(page2.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
 
     const titleInput2 = page2.getByPlaceholder('Untitled')
@@ -353,14 +324,7 @@ test.describe('Backlinks', () => {
 
     // In page2, mention Document P
     const editor2 = page2.locator('.ProseMirror')
-    await editor2.click()
-
-    // Type @ first to trigger mention popup, then type search term
-    await page2.keyboard.type('@')
-
-    // Wait for mention popup to appear
-    const mentionPopup = page2.locator('[role="listbox"]')
-    await expect(mentionPopup).toBeVisible({ timeout: 5000 })
+    await triggerMentionPopup(page2, editor2)
 
     // Type search term to filter
     await page2.keyboard.type('Real-time Doc')
@@ -444,7 +408,7 @@ test.describe('Backlinks', () => {
     for (let i = 1; i <= 2; i++) {
       await page.goto('/docs')
       await page.getByRole('button', { name: 'New Document', exact: true }).click()
-      await expect(page).toHaveURL(/\/docs\/[a-f0-9-]+/, { timeout: 10000 })
+      await expect(page).toHaveURL(/\/documents\/[a-f0-9-]+/, { timeout: 10000 })
       await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
 
       const titleInput = page.getByPlaceholder('Untitled')
@@ -455,21 +419,43 @@ test.describe('Backlinks', () => {
       )
 
       const editor = page.locator('.ProseMirror')
+
+      // Blur title input first by pressing Tab, then focus editor
+      await page.keyboard.press('Tab')
+      await page.waitForTimeout(200)
+
+      // Click editor to ensure focus
       await editor.click()
+      await page.waitForTimeout(500)
 
-      // Mention Popular Doc - wait for popup and select
-      await page.keyboard.type('@Popular Doc')
+      // Ensure editor has focus by checking it's the active element
+      await page.evaluate(() => {
+        const editor = document.querySelector('.ProseMirror')
+        if (editor instanceof HTMLElement) editor.focus()
+      })
+      await page.waitForTimeout(200)
 
-      // Wait for mention popup to appear
+      // Type @ to trigger mention popup
+      await page.keyboard.type('@')
+
+      // Wait for mention popup to appear (may take a moment for API call)
       const mentionPopup = page.locator('[role="listbox"]')
-      await expect(mentionPopup).toBeVisible({ timeout: 5000 })
+      await expect(mentionPopup).toBeVisible({ timeout: 10000 })
 
-      // Click the option
+      // Type search term
+      await page.keyboard.type('Popular Doc')
+
+      // Wait for results to filter
+      await page.waitForTimeout(500)
+
+      // Wait for our document to appear in results and select it
       const docOption = page.locator('[role="option"]').filter({ hasText: 'Popular Doc' })
       await expect(docOption).toBeVisible({ timeout: 3000 })
-      await docOption.click()
 
-      // Wait for mention to be inserted (check for mention element in editor)
+      // Press Enter to select
+      await page.keyboard.press('Enter')
+
+      // Wait for mention to be inserted
       await expect(editor.locator('[data-type="mention"], .mention')).toBeVisible({ timeout: 3000 })
 
       // Wait for link sync to complete

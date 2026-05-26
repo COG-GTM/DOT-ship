@@ -1,24 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ProjectCombobox, Project } from '@/components/ProjectCombobox';
+import { useAuth } from '@/hooks/useAuth';
 import { cn } from '@/lib/cn';
-
-const API_URL = import.meta.env.VITE_API_URL ?? '';
-
-type TeamTab = 'assignments' | 'accountability';
-
-// CSRF token cache
-let csrfToken: string | null = null;
-
-async function getCsrfToken(): Promise<string> {
-  if (!csrfToken) {
-    const res = await fetch(`${API_URL}/api/csrf-token`, { credentials: 'include' });
-    const data = await res.json();
-    csrfToken = data.token;
-  }
-  return csrfToken!;
-}
+import { apiPost, apiGet, apiDelete } from '@/lib/api';
+import { formatDateRange } from '@/lib/date-utils';
 
 interface User {
   personId: string; // Document ID - used for allocations (works for both pending and active)
@@ -27,6 +14,7 @@ interface User {
   email: string;
   isArchived?: boolean;
   isPending?: boolean;
+  reportsTo?: string | null; // user_id of supervisor
 }
 
 interface Sprint {
@@ -40,6 +28,7 @@ interface Sprint {
 interface Assignment {
   projectId: string | null;
   projectName: string | null;
+  projectColor: string | null;
   programId: string | null;
   programName: string | null;
   emoji?: string | null;
@@ -48,7 +37,7 @@ interface Assignment {
 
 interface TeamGridData {
   users: User[];
-  sprints: Sprint[];
+  weeks: Sprint[];
   currentSprintNumber: number;
 }
 
@@ -66,10 +55,7 @@ interface ProgramGroup {
 
 export function TeamModePage() {
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<TeamTab>(
-    (searchParams.get('tab') as TeamTab) || 'assignments'
-  );
+  const { user } = useAuth();
   const [data, setData] = useState<TeamGridData | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [assignments, setAssignments] = useState<Record<string, Record<number, Assignment>>>({});
@@ -77,24 +63,85 @@ export function TeamModePage() {
   const [loadingMore, setLoadingMore] = useState<'left' | 'right' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [showPastWeeks, setShowPastWeeks] = useState(() => {
+    try {
+      return localStorage.getItem('ship:allocation-show-past-weeks') === 'true';
+    } catch { return false; }
+  });
+  const [filterMode, setFilterMode] = useState<'my-team' | 'everyone' | null>(() => {
+    try {
+      const stored = localStorage.getItem('ship:allocation-filter-mode');
+      if (stored === 'my-team' || stored === 'everyone') return stored;
+    } catch { /* ignore */ }
+    return null;
+  });
+  const [nameFilter, setNameFilter] = useState('');
   const [sprintRange, setSprintRange] = useState<{ min: number; max: number } | null>(null);
   const [collapsedPrograms, setCollapsedPrograms] = useState<Set<string>>(new Set());
+  const [viewAsSprintNumber, setViewAsSprintNumber] = useState<number | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const hasScrolledToCurrentRef = useRef(false);
 
   // Find the current sprint number
   const currentSprintNumber = data?.currentSprintNumber ?? null;
 
-  // Group users by their current sprint assignment's program
+  // Filter weeks to hide past weeks when showPastWeeks is false
+  const visibleWeeks = useMemo(() => {
+    if (!data) return [];
+    if (showPastWeeks || currentSprintNumber === null) return data.weeks;
+    return data.weeks.filter(s => s.number >= currentSprintNumber);
+  }, [data, showPastWeeks, currentSprintNumber]);
+
+  // Smart default: if user has direct reports, default to "my-team"
+  const hasDirectReports = useMemo(() => {
+    if (!data || !user?.id) return false;
+    return data.users.some(u => u.reportsTo === user.id);
+  }, [data, user?.id]);
+
+  // Set smart default when data first loads (only if no stored value)
+  useEffect(() => {
+    if (data && filterMode === null) {
+      setFilterMode(hasDirectReports ? 'my-team' : 'everyone');
+    }
+  }, [data, filterMode, hasDirectReports]);
+
+  // Persist filter mode and past-weeks visibility to localStorage
+  useEffect(() => {
+    if (filterMode !== null) {
+      localStorage.setItem('ship:allocation-filter-mode', filterMode);
+    }
+  }, [filterMode]);
+
+  useEffect(() => {
+    localStorage.setItem('ship:allocation-show-past-weeks', String(showPastWeeks));
+  }, [showPastWeeks]);
+
+  // Filter users based on filter mode and name search
+  const filteredUsers = useMemo(() => {
+    if (!data) return [];
+    let users = data.users;
+    if (filterMode === 'my-team' && user?.id) {
+      users = users.filter(u => u.reportsTo === user.id);
+    }
+    if (nameFilter.trim()) {
+      const query = nameFilter.trim().toLowerCase();
+      users = users.filter(u => u.name.toLowerCase().includes(query));
+    }
+    return users;
+  }, [data, filterMode, user?.id, nameFilter]);
+
+  // Group users by their assignment's program for the viewed sprint
+  const groupingSprintNumber = viewAsSprintNumber ?? currentSprintNumber;
+
   const programGroups = useMemo((): ProgramGroup[] => {
     if (!data) return [];
 
     const groups: Map<string, ProgramGroup> = new Map();
     const UNASSIGNED_KEY = '__unassigned__';
 
-    for (const user of data.users) {
-      const currentAssignment = currentSprintNumber
-        ? assignments[user.personId]?.[currentSprintNumber]
+    for (const user of filteredUsers) {
+      const currentAssignment = groupingSprintNumber
+        ? assignments[user.personId]?.[groupingSprintNumber]
         : null;
 
       const groupKey = currentAssignment?.programId || UNASSIGNED_KEY;
@@ -125,7 +172,7 @@ export function TeamModePage() {
     }
 
     return sortedGroups;
-  }, [data, assignments, currentSprintNumber]);
+  }, [data, filteredUsers, assignments, groupingSprintNumber]);
 
   // Toggle program group collapse
   const toggleProgramCollapse = useCallback((programId: string | null) => {
@@ -140,11 +187,6 @@ export function TeamModePage() {
       return next;
     });
   }, []);
-
-  const handleTabChange = (tab: TeamTab) => {
-    setActiveTab(tab);
-    setSearchParams({ tab });
-  };
 
   // Dialog states
   const [lastPersonDialog, setLastPersonDialog] = useState<{
@@ -172,22 +214,23 @@ export function TeamModePage() {
     fetchTeamGrid(sprintRange?.min, sprintRange?.max, showArchived);
   }, [showArchived]);
 
-  // Scroll to current sprint on initial load
+  // Scroll to current sprint on initial load (only when past weeks are shown)
   useEffect(() => {
+    if (!showPastWeeks) return; // No need to scroll when past weeks are hidden
     if (data && scrollContainerRef.current && !hasScrolledToCurrentRef.current) {
-      const currentSprintIndex = data.sprints.findIndex(s => s.isCurrent);
+      const currentSprintIndex = data.weeks.findIndex(s => s.isCurrent);
       if (currentSprintIndex >= 0) {
         requestAnimationFrame(() => {
           if (scrollContainerRef.current) {
-            const columnWidth = 140;
-            const scrollPosition = Math.max(0, (currentSprintIndex - 1) * columnWidth);
+            const columnWidth = 180; // matches w-[180px] on sprint columns
+            const scrollPosition = currentSprintIndex * columnWidth;
             scrollContainerRef.current.scrollLeft = scrollPosition;
             hasScrolledToCurrentRef.current = true;
           }
         });
       }
     }
-  }, [data]);
+  }, [data, showPastWeeks]);
 
   async function fetchTeamGrid(fromSprint?: number, toSprint?: number, includeArchived = false) {
     try {
@@ -196,15 +239,15 @@ export function TeamModePage() {
       if (toSprint !== undefined) params.set('toSprint', String(toSprint));
       if (includeArchived) params.set('includeArchived', 'true');
 
-      const url = `${API_URL}/api/team/grid${params.toString() ? `?${params}` : ''}`;
-      const res = await fetch(url, { credentials: 'include' });
+      const url = `/api/team/grid${params.toString() ? `?${params}` : ''}`;
+      const res = await apiGet(url);
       if (!res.ok) throw new Error('Failed to fetch team grid');
       const json: TeamGridData = await res.json();
 
-      if (json.sprints.length > 0) {
+      if (json.weeks.length > 0) {
         setSprintRange({
-          min: json.sprints[0].number,
-          max: json.sprints[json.sprints.length - 1].number,
+          min: json.weeks[0].number,
+          max: json.weeks[json.weeks.length - 1].number,
         });
       }
 
@@ -216,7 +259,7 @@ export function TeamModePage() {
 
   async function fetchProjects() {
     try {
-      const res = await fetch(`${API_URL}/api/team/projects`, { credentials: 'include' });
+      const res = await apiGet(`/api/team/projects`);
       if (res.ok) {
         const json = await res.json();
         setProjects(json);
@@ -228,7 +271,7 @@ export function TeamModePage() {
 
   async function fetchAssignments() {
     try {
-      const res = await fetch(`${API_URL}/api/team/assignments`, { credentials: 'include' });
+      const res = await apiGet(`/api/team/assignments`);
       if (res.ok) {
         const json = await res.json();
         setAssignments(json);
@@ -251,6 +294,7 @@ export function TeamModePage() {
         [sprintNumber]: {
           projectId,
           projectName: project.title,
+          projectColor: project.color ?? null,
           programId: project.programId,
           programName: project.programName,
           emoji: project.programEmoji ?? null,
@@ -260,13 +304,7 @@ export function TeamModePage() {
     }));
 
     try {
-      const token = await getCsrfToken();
-      const res = await fetch(`${API_URL}/api/team/assign`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
-        credentials: 'include',
-        body: JSON.stringify({ personId, projectId, sprintNumber }),
-      });
+      const res = await apiPost(`/api/team/assign`, { personId, projectId, sprintNumber });
 
       const json = await res.json();
 
@@ -314,13 +352,7 @@ export function TeamModePage() {
     });
 
     try {
-      const token = await getCsrfToken();
-      const res = await fetch(`${API_URL}/api/team/assign`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': token },
-        credentials: 'include',
-        body: JSON.stringify({ personId, sprintNumber }),
-      });
+      const res = await apiDelete(`/api/team/assign`, { personId, sprintNumber });
 
       const json = await res.json();
 
@@ -341,8 +373,7 @@ export function TeamModePage() {
 
       // If there were orphaned issues, show them in a dialog (unless skipped)
       if (json.issuesOrphaned?.length > 0 && !skipConfirmation) {
-        // Issues were already moved to backlog, just inform the user
-        console.log(`${json.issuesOrphaned.length} issues moved to backlog`);
+        // Issues were already moved to backlog
       }
     } catch (err) {
       // Rollback optimistic update
@@ -407,7 +438,7 @@ export function TeamModePage() {
       });
       if (showArchived) params.set('includeArchived', 'true');
 
-      const res = await fetch(`${API_URL}/api/team/grid?${params}`, { credentials: 'include' });
+      const res = await apiGet(`/api/team/grid?${params}`);
       if (!res.ok) throw new Error('Failed to fetch more sprints');
       const newData: TeamGridData = await res.json();
 
@@ -418,9 +449,9 @@ export function TeamModePage() {
       setData(prev => {
         if (!prev) return newData;
         const mergedSprints = direction === 'left'
-          ? [...newData.sprints, ...prev.sprints]
-          : [...prev.sprints, ...newData.sprints];
-        return { ...prev, sprints: mergedSprints };
+          ? [...newData.weeks, ...prev.weeks]
+          : [...prev.weeks, ...newData.weeks];
+        return { ...prev, weeks: mergedSprints };
       });
 
       setSprintRange(prev => {
@@ -451,14 +482,14 @@ export function TeamModePage() {
 
     const { scrollLeft, scrollWidth, clientWidth } = container;
 
-    if (scrollLeft < SCROLL_THRESHOLD && sprintRange && sprintRange.min > 1) {
+    if (showPastWeeks && scrollLeft < SCROLL_THRESHOLD && sprintRange && sprintRange.min > 1) {
       fetchMoreSprints('left');
     }
 
     if (scrollWidth - scrollLeft - clientWidth < SCROLL_THRESHOLD) {
       fetchMoreSprints('right');
     }
-  }, [fetchMoreSprints, loadingMore, sprintRange]);
+  }, [fetchMoreSprints, loadingMore, sprintRange, showPastWeeks]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -467,6 +498,16 @@ export function TeamModePage() {
     container.addEventListener('scroll', handleScroll);
     return () => container.removeEventListener('scroll', handleScroll);
   }, [handleScroll]);
+
+  // Escape key clears view-as mode
+  useEffect(() => {
+    if (viewAsSprintNumber === null) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setViewAsSprintNumber(null);
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [viewAsSprintNumber]);
 
   // Clear error after 3 seconds
   useEffect(() => {
@@ -501,36 +542,85 @@ export function TeamModePage() {
         </div>
       )}
 
-      {/* Header with Tabs */}
+      {/* Header */}
       <header className="flex h-10 items-center justify-between border-b border-border px-4">
-        <div className="flex items-center gap-4">
-          <h1 className="text-sm font-medium text-foreground">Teams</h1>
-          <div className="flex gap-1">
-            <button
-              onClick={() => handleTabChange('assignments')}
-              className={cn(
-                'px-3 py-1 text-xs font-medium rounded-md transition-colors',
-                activeTab === 'assignments'
-                  ? 'bg-accent text-white'
-                  : 'text-muted hover:text-foreground hover:bg-border/50'
-              )}
-            >
-              Assignments
-            </button>
-            <button
-              onClick={() => handleTabChange('accountability')}
-              className={cn(
-                'px-3 py-1 text-xs font-medium rounded-md transition-colors',
-                activeTab === 'accountability'
-                  ? 'bg-accent text-white'
-                  : 'text-muted hover:text-foreground hover:bg-border/50'
-              )}
-            >
-              Accountability
-            </button>
+        <div className="flex items-center gap-3">
+          <h1 className="text-sm font-medium text-foreground">Allocation</h1>
+          {hasDirectReports && (
+            <div className="flex rounded-md border border-border text-xs">
+              <button
+                onClick={() => setFilterMode('my-team')}
+                className={cn(
+                  'px-2 py-0.5 transition-colors',
+                  filterMode === 'my-team'
+                    ? 'bg-accent text-white'
+                    : 'text-muted hover:text-foreground'
+                )}
+              >
+                My Team
+              </button>
+              <button
+                onClick={() => setFilterMode('everyone')}
+                className={cn(
+                  'px-2 py-0.5 transition-colors',
+                  filterMode === 'everyone'
+                    ? 'bg-accent text-white'
+                    : 'text-muted hover:text-foreground'
+                )}
+              >
+                Everyone
+              </button>
+            </div>
+          )}
+          <div className="relative">
+            <input
+              type="text"
+              value={nameFilter}
+              onChange={(e) => setNameFilter(e.target.value)}
+              placeholder="Filter by name..."
+              className="h-6 w-36 rounded border border-border bg-transparent px-2 text-xs text-foreground placeholder:text-muted focus:border-accent focus:outline-none"
+            />
+            {nameFilter && (
+              <button
+                onClick={() => setNameFilter('')}
+                className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted hover:text-foreground"
+              >
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
           </div>
+          {viewAsSprintNumber !== null && (
+            <div className="flex items-center gap-1.5 rounded-md border border-accent/30 bg-accent/10 px-2 py-0.5 text-xs text-accent">
+              <span>Viewing as {data.weeks.find(w => w.number === viewAsSprintNumber)?.name ?? `Week ${viewAsSprintNumber}`}</span>
+              <button
+                onClick={() => setViewAsSprintNumber(null)}
+                className="ml-0.5 rounded p-0.5 hover:bg-accent/20"
+                title="Return to current week"
+              >
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-4">
+          <button
+            onClick={() => setShowPastWeeks(prev => !prev)}
+            className={cn(
+              'flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs transition-colors',
+              showPastWeeks
+                ? 'bg-accent text-white border-accent'
+                : 'text-muted hover:text-foreground hover:border-foreground/30'
+            )}
+          >
+            <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            {showPastWeeks ? 'Hide' : 'Show'} past weeks
+          </button>
           <label className="flex items-center gap-1.5 cursor-pointer">
             <input
               type="checkbox"
@@ -541,20 +631,16 @@ export function TeamModePage() {
             <span className="text-xs text-muted">Show archived</span>
           </label>
           <span className="text-xs text-muted">
-            {data.users.length} team members &middot; {projects.length} projects
+            {filteredUsers.length} team members &middot; {projects.length} projects
           </span>
         </div>
       </header>
 
-      {/* Tab Content */}
-      {activeTab === 'accountability' ? (
-        <AccountabilityTable />
-      ) : (
-        /* Assignments Grid - Single scroll container with sticky person column */
-        <div
-          ref={scrollContainerRef}
-          className="flex-1 overflow-auto"
-        >
+      {/* Assignments Grid - Single scroll container with sticky person column */}
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 overflow-auto pb-20"
+      >
           <div className="inline-flex min-w-full">
             {/* Sticky person column */}
             <div className="flex flex-col sticky left-0 z-20 bg-background border-r border-border">
@@ -646,24 +732,36 @@ export function TeamModePage() {
                 </div>
               )}
 
-              {data.sprints.map((sprint) => (
+              {visibleWeeks.map((sprint) => {
+                const isActiveViewAs = sprint.number === viewAsSprintNumber;
+                const isDefaultCurrent = sprint.isCurrent && viewAsSprintNumber === null;
+                const showViewAsButton = !isActiveViewAs && !isDefaultCurrent;
+
+                return (
                 <div key={sprint.number} className="flex flex-col">
                   {/* Sprint header */}
                   <div
                     className={cn(
-                      'flex h-10 w-[140px] flex-col items-center justify-center border-b border-r border-border px-2 sticky top-0 z-10',
-                      sprint.isCurrent ? 'bg-accent/10' : 'bg-background'
+                      'group flex h-10 w-[180px] flex-col items-center justify-center border-b border-r border-border px-2 sticky top-0 z-10 bg-background',
+                      sprint.isCurrent && 'ring-1 ring-inset ring-accent/30',
+                      isActiveViewAs && 'ring-2 ring-inset ring-accent/50 bg-accent/5'
                     )}
                   >
-                    <span className={cn(
-                      'text-xs font-medium',
-                      sprint.isCurrent ? 'text-accent' : 'text-foreground'
-                    )}>
+                    <span className="text-xs font-medium text-foreground">
                       {sprint.name}
                     </span>
                     <span className="text-[10px] text-muted">
                       {formatDateRange(sprint.startDate, sprint.endDate)}
                     </span>
+                    {showViewAsButton && (
+                      <button
+                        onClick={() => setViewAsSprintNumber(sprint.number)}
+                        title="View as current week"
+                        className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted opacity-0 transition-opacity hover:bg-border/50 hover:text-foreground group-hover:opacity-100"
+                      >
+                        <ViewAsIcon className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
 
                   {/* Sprint cells grouped by program */}
@@ -676,7 +774,7 @@ export function TeamModePage() {
                         {/* Program header spacer row for this sprint column */}
                         <div
                           className={cn(
-                            "h-8 w-[140px] border-b border-r border-border bg-border/30",
+                            "h-8 w-[180px] border-b border-r border-border bg-border/30",
                             sprint.isCurrent && "bg-accent/5"
                           )}
                         />
@@ -708,7 +806,7 @@ export function TeamModePage() {
                                   assignment || null
                                 );
                               }}
-                              onNavigate={(projectId) => navigate(`/projects/${projectId}`)}
+                              onNavigate={(projectId) => navigate(`/documents/${projectId}`)}
                             />
                           );
                         })}
@@ -716,7 +814,8 @@ export function TeamModePage() {
                     );
                   })}
                 </div>
-              ))}
+                );
+              })}
 
               {loadingMore === 'right' && (
                 <div className="flex flex-col w-[60px]">
@@ -728,7 +827,6 @@ export function TeamModePage() {
             </div>
           </div>
         </div>
-      )}
 
       {/* Last Person Dialog */}
       <Dialog.Root open={lastPersonDialog?.open || false} onOpenChange={(open: boolean) => !open && setLastPersonDialog(null)}>
@@ -770,7 +868,7 @@ export function TeamModePage() {
                 }}
                 className="rounded-md bg-red-600 px-4 py-2 text-sm text-white hover:bg-red-700"
               >
-                Remove & Delete Sprint
+                Remove & Delete Week
               </button>
             </div>
           </Dialog.Content>
@@ -805,6 +903,7 @@ function SprintCell({
       ? {
           id: previousWeekAssignment.projectId,
           title: previousWeekAssignment.projectName,
+          color: previousWeekAssignment.projectColor,
           programId: previousWeekAssignment.programId,
           programName: previousWeekAssignment.programName,
           programEmoji: previousWeekAssignment.emoji,
@@ -816,7 +915,7 @@ function SprintCell({
   return (
     <div
       className={cn(
-        'flex h-12 w-[140px] items-center justify-start border-b border-r border-border px-1',
+        'flex h-12 w-[180px] items-center justify-start border-b border-r border-border px-1',
         isCurrent && 'bg-accent/5',
         loading && 'animate-pulse',
         isPending && 'border-dashed'
@@ -839,22 +938,6 @@ function SprintCell({
   );
 }
 
-function formatDateRange(startDate: string, endDate: string): string {
-  // Parse as UTC to avoid timezone issues with YYYY-MM-DD format
-  const start = new Date(startDate + 'T00:00:00Z');
-  const end = new Date(endDate + 'T00:00:00Z');
-
-  const startMonth = start.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
-  const startDay = start.getUTCDate();
-  const endMonth = end.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
-  const endDay = end.getUTCDate();
-
-  if (startMonth === endMonth) {
-    return `${startMonth} ${startDay}-${endDay}`;
-  }
-  return `${startMonth} ${startDay} - ${endMonth} ${endDay}`;
-}
-
 function ChevronIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -863,174 +946,11 @@ function ChevronIcon({ className }: { className?: string }) {
   );
 }
 
-// Accountability Table Component - shows sprint completion metrics per person
-interface AccountabilitySprint {
-  number: number;
-  name: string;
-  startDate: string;
-  endDate: string;
-  isCurrent: boolean;
-}
-
-interface AccountabilityPerson {
-  id: string;
-  name: string;
-}
-
-interface AccountabilityMetrics {
-  committed: number;
-  completed: number;
-}
-
-interface PatternAlert {
-  hasAlert: boolean;
-  consecutiveCount: number;
-  trend: number[]; // -1 means no data for that sprint
-}
-
-function AccountabilityTable() {
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [people, setPeople] = useState<AccountabilityPerson[]>([]);
-  const [sprints, setSprints] = useState<AccountabilitySprint[]>([]);
-  const [metrics, setMetrics] = useState<Record<string, Record<number, AccountabilityMetrics>>>({});
-  const [patternAlerts, setPatternAlerts] = useState<Record<string, PatternAlert>>({});
-
-  useEffect(() => {
-    async function fetchAccountability() {
-      try {
-        const res = await fetch(`${API_URL}/api/team/accountability`, { credentials: 'include' });
-        if (!res.ok) {
-          if (res.status === 403) {
-            setError('Admin access required to view accountability metrics');
-          } else {
-            setError('Failed to load accountability data');
-          }
-          return;
-        }
-        const data = await res.json();
-        setPeople(data.people);
-        setSprints(data.sprints);
-        setMetrics(data.metrics);
-        setPatternAlerts(data.patternAlerts || {});
-      } catch (err) {
-        setError('Failed to load accountability data');
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchAccountability();
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <span className="text-sm text-muted">Loading accountability data...</span>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="flex flex-1 items-center justify-center">
-        <span className="text-sm text-red-500">{error}</span>
-      </div>
-    );
-  }
-
+function ViewAsIcon({ className }: { className?: string }) {
   return (
-    <div className="flex flex-1 overflow-auto">
-      <table className="min-w-full border-collapse">
-        <thead>
-          <tr>
-            <th className="sticky left-0 top-0 z-20 bg-background border-b border-r border-border px-4 py-2 text-left text-xs font-medium text-muted w-[180px]">
-              Team Member
-            </th>
-            {sprints.map((sprint) => (
-              <th
-                key={sprint.number}
-                className={cn(
-                  'sticky top-0 z-10 bg-background border-b border-r border-border px-3 py-2 text-center text-xs font-medium min-w-[100px]',
-                  sprint.isCurrent ? 'text-accent' : 'text-muted'
-                )}
-              >
-                <div>{sprint.name}</div>
-                <div className="text-[10px] font-normal">
-                  {formatDateRange(sprint.startDate, sprint.endDate)}
-                </div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {people.map((person) => {
-            const alert = patternAlerts[person.id];
-            const hasPatternAlert = alert?.hasAlert;
-            const trendString = alert?.trend
-              .map(t => t === -1 ? '-' : `${t}%`)
-              .join(' → ');
-
-            return (
-            <tr key={person.id}>
-              <td className="sticky left-0 z-10 bg-background border-b border-r border-border px-4 py-2">
-                <div className="flex items-center gap-2">
-                  <div className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-accent/80 text-xs font-medium text-white">
-                    {person.name.charAt(0).toUpperCase()}
-                  </div>
-                  <span className="truncate text-sm text-foreground">{person.name}</span>
-                  {hasPatternAlert && (
-                    <span
-                      className="ml-1 text-orange-500 cursor-help"
-                      title={`⚠️ Low completion pattern: ${alert.consecutiveCount} consecutive sprints below 60%\nTrend: ${trendString}`}
-                    >
-                      ⚠
-                    </span>
-                  )}
-                </div>
-              </td>
-              {sprints.map((sprint) => {
-                const cellMetrics = metrics[person.id]?.[sprint.number];
-                const committed = cellMetrics?.committed || 0;
-                const completed = cellMetrics?.completed || 0;
-                const percentage = committed > 0 ? Math.round((completed / committed) * 100) : null;
-                const isLow = percentage !== null && percentage < 60;
-
-                return (
-                  <td
-                    key={sprint.number}
-                    className={cn(
-                      'border-b border-r border-border px-3 py-2 text-center text-sm',
-                      sprint.isCurrent && 'bg-accent/5',
-                      isLow && 'bg-red-500/10'
-                    )}
-                  >
-                    {committed > 0 ? (
-                      <div className="flex flex-col items-center">
-                        <span className={cn(
-                          'font-medium',
-                          isLow ? 'text-red-500' : 'text-foreground'
-                        )}>
-                          {completed}/{committed}
-                        </span>
-                        <span className={cn(
-                          'text-xs',
-                          isLow ? 'text-red-400' : 'text-muted'
-                        )}>
-                          {percentage}%
-                        </span>
-                      </div>
-                    ) : (
-                      <span className="text-muted">-</span>
-                    )}
-                  </td>
-                );
-              })}
-            </tr>
-          );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+    </svg>
   );
 }
