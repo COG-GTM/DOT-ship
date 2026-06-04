@@ -8,13 +8,15 @@ import { UseSelectionReturn } from '@/hooks/useSelection';
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/ContextMenu';
 import { useToast } from '@/components/ui/Toast';
 import { getContrastTextColor, cn } from '@/lib/cn';
+import { formatDate } from '@/lib/date-utils';
+import { ArchiveIcon } from '@/components/icons/ArchiveIcon';
 
 // Column definitions for programs list
 const ALL_COLUMNS: ColumnDefinition[] = [
   { key: 'name', label: 'Name', hideable: false },
   { key: 'owner', label: 'Owner', hideable: true },
   { key: 'issue_count', label: 'Issues', hideable: true },
-  { key: 'sprint_count', label: 'Sprints', hideable: true },
+  { key: 'sprint_count', label: 'Weeks', hideable: true },
   { key: 'created', label: 'Created', hideable: true },
   { key: 'updated', label: 'Updated', hideable: true },
 ];
@@ -91,7 +93,7 @@ export function ProgramsPage() {
     try {
       const program = await createProgram();
       if (program) {
-        navigate(`/programs/${program.id}`);
+        navigate(`/documents/${program.id}`);
       }
     } catch (err) {
       console.error('Failed to create program:', err);
@@ -157,7 +159,7 @@ export function ProgramsPage() {
       <button
         onClick={handleCreateProgram}
         disabled={creating}
-        className="mt-2 text-sm text-accent hover:underline disabled:opacity-50"
+        className="mt-2 text-sm text-accent-bright hover:underline disabled:opacity-50"
       >
         Create your first program
       </button>
@@ -196,14 +198,14 @@ export function ProgramsPage() {
       </div>
 
       {/* Programs List */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto pb-20">
         <SelectableList
           items={sortedPrograms}
           loading={loading}
           renderRow={renderProgramRow}
           columns={columns}
           emptyState={emptyState}
-          onItemClick={(program) => navigate(`/programs/${program.id}`)}
+          onItemClick={(program) => navigate(`/documents/${program.id}`)}
           selectable={true}
           onSelectionChange={handleSelectionChange}
           onContextMenu={handleContextMenu}
@@ -332,7 +334,7 @@ function ProgramRowContent({ program, visibleColumns }: ProgramRowContentProps) 
               <span className="truncate">{program.owner.name}</span>
             </div>
           ) : (
-            <span className="text-muted/50">—</span>
+            <span className="text-muted">—</span>
           )}
         </td>
       )}
@@ -373,31 +375,7 @@ function getInitials(name: string): string {
     .slice(0, 2);
 }
 
-function formatDate(dateString: string): string {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
 // Icons
-function ArchiveIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-    </svg>
-  );
-}
-
 function TrashIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">

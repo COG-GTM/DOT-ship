@@ -136,7 +136,7 @@ export function DocumentsPage() {
     try {
       const doc = await createDocument(parentId);
       if (doc) {
-        navigate(`/docs/${doc.id}`);
+        navigate(`/documents/${doc.id}`);
       }
     } finally {
       setCreating(false);
@@ -262,7 +262,7 @@ export function DocumentsPage() {
                 <p className="text-muted">No documents yet</p>
                 <button
                   onClick={() => handleCreateDocument()}
-                  className="mt-2 text-sm text-accent hover:underline"
+                  className="mt-2 text-sm text-accent-bright hover:underline"
                 >
                   Create your first document
                 </button>
@@ -278,7 +278,7 @@ export function DocumentsPage() {
           </div>
         </div>
       ) : viewMode === 'tree' ? (
-        <div className="flex-1 overflow-auto p-6">
+        <div className="flex-1 overflow-auto p-6 pb-20">
           <ul role="tree" aria-label="Documents" className="space-y-0.5">
             {documentTree.map((doc) => (
               <DocumentTreeItem
@@ -291,13 +291,13 @@ export function DocumentsPage() {
           </ul>
         </div>
       ) : (
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto pb-20">
           <SelectableList
             items={sortedDocuments}
             getItemId={(doc) => doc.id}
             renderRow={(doc, props) => renderDocumentRow(doc, props)}
             columns={columns}
-            onItemClick={(doc) => navigate(`/docs/${doc.id}`)}
+            onItemClick={(doc) => navigate(`/documents/${doc.id}`)}
             selectable={true}
             onSelectionChange={(ids) => setSelectedIds(ids)}
             onContextMenu={handleContextMenu}

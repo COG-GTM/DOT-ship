@@ -1,0 +1,170 @@
+[
+  {
+    "name": "login",
+    "route": "/login",
+    "scannedAt": "2026-05-20T17:36:22.545Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "my-week",
+    "route": "/my-week",
+    "scannedAt": "2026-05-20T17:36:26.563Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "dashboard",
+    "route": "/dashboard",
+    "scannedAt": "2026-05-20T17:36:30.270Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "docs",
+    "route": "/docs",
+    "scannedAt": "2026-05-20T17:36:34.337Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "issues",
+    "route": "/issues",
+    "scannedAt": "2026-05-20T17:36:43.338Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "projects",
+    "route": "/projects",
+    "scannedAt": "2026-05-20T17:36:48.171Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "programs",
+    "route": "/programs",
+    "scannedAt": "2026-05-20T17:36:52.074Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "team-allocation",
+    "route": "/team/allocation",
+    "scannedAt": "2026-05-20T17:36:56.254Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "team-directory",
+    "route": "/team/directory",
+    "scannedAt": "2026-05-20T17:36:59.993Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "team-status",
+    "route": "/team/status",
+    "scannedAt": "2026-05-20T17:37:04.442Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "team-org-chart",
+    "route": "/team/org-chart",
+    "scannedAt": "2026-05-20T17:37:08.350Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  },
+  {
+    "name": "settings",
+    "route": "/settings",
+    "scannedAt": "2026-05-20T17:37:12.227Z",
+    "totals": {
+      "violations": 0,
+      "critical": 0,
+      "serious": 0,
+      "moderate": 0,
+      "minor": 0,
+      "nodes": 0
+    },
+    "violations": []
+  }
+]

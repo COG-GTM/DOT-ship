@@ -3,6 +3,7 @@ import { pool } from '../db/client.js';
 import { z } from 'zod';
 import { getVisibilityContext, VISIBILITY_FILTER_SQL } from '../middleware/visibility.js';
 import { authMiddleware } from '../middleware/auth.js';
+import { logAuditEvent } from '../services/audit.js';
 
 type RouterType = ReturnType<typeof Router>;
 const router: RouterType = Router();
@@ -26,6 +27,11 @@ function extractProgramFromRow(row: any) {
       name: row.owner_name,
       email: row.owner_email,
     } : null,
+    owner_id: props.owner_id || null,
+    // RACI fields
+    accountable_id: props.accountable_id || null,
+    consulted_ids: props.consulted_ids || [],
+    informed_ids: props.informed_ids || [],
   };
 }
 
@@ -34,13 +40,20 @@ const createProgramSchema = z.object({
   title: z.string().min(1).max(200).optional().default('Untitled'),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().default('#6366f1'),
   emoji: z.string().max(10).optional().nullable(),
+  owner_id: z.string().uuid().optional().nullable().default(null), // R - Responsible (does the work)
+  accountable_id: z.string().uuid().optional().nullable().default(null), // A - Accountable (approver)
+  consulted_ids: z.array(z.string().uuid()).optional().default([]), // C - Consulted (provide input)
+  informed_ids: z.array(z.string().uuid()).optional().default([]), // I - Informed (kept in loop)
 });
 
 const updateProgramSchema = z.object({
   title: z.string().min(1).max(200).optional(),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   emoji: z.string().max(10).optional().nullable(),
-  owner_id: z.string().uuid().optional().nullable(),
+  owner_id: z.string().uuid().optional().nullable(), // R - Responsible (can be cleared)
+  accountable_id: z.string().uuid().optional().nullable(), // A - Accountable (can be cleared)
+  consulted_ids: z.array(z.string().uuid()).optional(), // C - Consulted
+  informed_ids: z.array(z.string().uuid()).optional(), // I - Informed
   archived_at: z.string().datetime().optional().nullable(),
 });
 
@@ -59,8 +72,12 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       SELECT d.id, d.title, d.properties, d.archived_at, d.created_at, d.updated_at,
              COALESCE((d.properties->>'owner_id')::uuid, d.created_by) as owner_id,
              u.name as owner_name, u.email as owner_email,
-             (SELECT COUNT(*) FROM documents i WHERE i.program_id = d.id AND i.document_type = 'issue') as issue_count,
-             (SELECT COUNT(*) FROM documents s WHERE s.program_id = d.id AND s.document_type = 'sprint') as sprint_count
+             (SELECT COUNT(*) FROM documents i
+              JOIN document_associations da ON da.document_id = i.id AND da.related_id = d.id AND da.relationship_type = 'program'
+              WHERE i.document_type = 'issue') as issue_count,
+             (SELECT COUNT(*) FROM documents s
+              JOIN document_associations da ON da.document_id = s.id AND da.related_id = d.id AND da.relationship_type = 'program'
+              WHERE s.document_type = 'sprint') as sprint_count
       FROM documents d
       LEFT JOIN users u ON u.id = COALESCE((d.properties->>'owner_id')::uuid, d.created_by)
       WHERE d.workspace_id = $1 AND d.document_type = 'program'
@@ -97,8 +114,12 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
       `SELECT d.id, d.title, d.properties, d.archived_at, d.created_at, d.updated_at,
               COALESCE((d.properties->>'owner_id')::uuid, d.created_by) as owner_id,
               u.name as owner_name, u.email as owner_email,
-              (SELECT COUNT(*) FROM documents i WHERE i.program_id = d.id AND i.document_type = 'issue') as issue_count,
-              (SELECT COUNT(*) FROM documents s WHERE s.program_id = d.id AND s.document_type = 'sprint') as sprint_count
+              (SELECT COUNT(*) FROM documents i
+               JOIN document_associations da ON da.document_id = i.id AND da.related_id = d.id AND da.relationship_type = 'program'
+               WHERE i.document_type = 'issue') as issue_count,
+              (SELECT COUNT(*) FROM documents s
+               JOIN document_associations da ON da.document_id = s.id AND da.related_id = d.id AND da.relationship_type = 'program'
+               WHERE s.document_type = 'sprint') as sprint_count
        FROM documents d
        LEFT JOIN users u ON u.id = COALESCE((d.properties->>'owner_id')::uuid, d.created_by)
        WHERE d.id = $1 AND d.workspace_id = $2 AND d.document_type = 'program'
@@ -127,11 +148,15 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       return;
     }
 
-    const { title, color, emoji } = parsed.data;
+    const { title, color, emoji, owner_id, accountable_id, consulted_ids, informed_ids } = parsed.data;
 
-    // Build properties JSONB
+    // Build properties JSONB with RACI fields
     const properties: Record<string, unknown> = {
       color: color || '#6366f1',
+      owner_id, // R - Responsible
+      accountable_id, // A - Accountable
+      consulted_ids, // C - Consulted
+      informed_ids, // I - Informed
     };
     if (emoji) {
       properties.emoji = emoji;
@@ -228,6 +253,21 @@ router.patch('/:id', authMiddleware, async (req: Request, res: Response) => {
       propsChanged = true;
     }
 
+    if (data.accountable_id !== undefined) {
+      newProps.accountable_id = data.accountable_id;
+      propsChanged = true;
+    }
+
+    if (data.consulted_ids !== undefined) {
+      newProps.consulted_ids = data.consulted_ids;
+      propsChanged = true;
+    }
+
+    if (data.informed_ids !== undefined) {
+      newProps.informed_ids = data.informed_ids;
+      propsChanged = true;
+    }
+
     if (propsChanged) {
       updates.push(`properties = $${paramIndex++}`);
       values.push(JSON.stringify(newProps));
@@ -293,9 +333,9 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
       return;
     }
 
-    // Remove program_id from child documents first
+    // Remove associations to this program
     await pool.query(
-      `UPDATE documents SET program_id = NULL WHERE program_id = $1`,
+      `DELETE FROM document_associations WHERE related_id = $1 AND relationship_type = 'program'`,
       [id]
     );
 
@@ -335,18 +375,21 @@ router.get('/:id/issues', authMiddleware, async (req: Request, res: Response) =>
       return;
     }
 
-    // Also filter the issues by visibility
+    // Also filter the issues by visibility - join via document_associations
     const result = await pool.query(
       `SELECT d.id, d.title, d.properties, d.ticket_number,
-              d.sprint_id, d.created_at, d.updated_at, d.created_by,
+              d.created_at, d.updated_at, d.created_by,
               u.name as assignee_name,
-              CASE WHEN person_doc.archived_at IS NOT NULL THEN true ELSE false END as assignee_archived
+              CASE WHEN person_doc.archived_at IS NOT NULL THEN true ELSE false END as assignee_archived,
+              sprint_da.related_id as sprint_id
        FROM documents d
+       JOIN document_associations da ON da.document_id = d.id AND da.related_id = $1 AND da.relationship_type = 'program'
+       LEFT JOIN document_associations sprint_da ON sprint_da.document_id = d.id AND sprint_da.relationship_type = 'sprint'
        LEFT JOIN users u ON (d.properties->>'assignee_id')::uuid = u.id
        LEFT JOIN documents person_doc ON person_doc.workspace_id = d.workspace_id
          AND person_doc.document_type = 'person'
          AND person_doc.properties->>'user_id' = d.properties->>'assignee_id'
-       WHERE d.program_id = $1 AND d.document_type = 'issue'
+       WHERE d.document_type = 'issue'
          AND ${VISIBILITY_FILTER_SQL('d', '$2', '$3')}
        ORDER BY
          CASE d.properties->>'priority'
@@ -411,16 +454,21 @@ router.get('/:id/projects', authMiddleware, async (req: Request, res: Response) 
       return;
     }
 
-    // Fetch projects belonging to this program
+    // Fetch projects belonging to this program via document_associations
     const result = await pool.query(
-      `SELECT d.id, d.title, d.properties, d.program_id, d.archived_at, d.created_at, d.updated_at,
+      `SELECT d.id, d.title, d.properties, $1::uuid as program_id, d.archived_at, d.created_at, d.updated_at,
               (d.properties->>'owner_id')::uuid as owner_id,
               u.name as owner_name, u.email as owner_email,
-              (SELECT COUNT(*) FROM documents s WHERE s.project_id = d.id AND s.document_type = 'sprint') as sprint_count,
-              (SELECT COUNT(*) FROM documents i WHERE i.project_id = d.id AND i.document_type = 'issue') as issue_count
+              (SELECT COUNT(*) FROM documents s
+               JOIN document_associations sda ON sda.document_id = s.id AND sda.related_id = d.id AND sda.relationship_type = 'project'
+               WHERE s.document_type = 'sprint') as sprint_count,
+              (SELECT COUNT(*) FROM documents i
+               JOIN document_associations ida ON ida.document_id = i.id AND ida.related_id = d.id AND ida.relationship_type = 'project'
+               WHERE i.document_type = 'issue') as issue_count
        FROM documents d
+       JOIN document_associations da ON da.document_id = d.id AND da.related_id = $1 AND da.relationship_type = 'program'
        LEFT JOIN users u ON u.id = (d.properties->>'owner_id')::uuid
-       WHERE d.program_id = $1 AND d.document_type = 'project'
+       WHERE d.document_type = 'project'
          AND ${VISIBILITY_FILTER_SQL('d', '$2', '$3')}
          AND d.archived_at IS NULL
        ORDER BY
@@ -493,22 +541,31 @@ router.get('/:id/sprints', authMiddleware, async (req: Request, res: Response) =
 
     const sprintStartDate = programCheck.rows[0].sprint_start_date;
 
-    // Also filter sprints by visibility
-    // Include subqueries for sprint_plan and sprint_retro existence
+    // Also filter sprints by visibility - join via document_associations
+    // Include subqueries for weekly_plan and weekly_retro existence
     const result = await pool.query(
       `SELECT d.id, d.title as name, d.properties,
               u.id as owner_id, u.name as owner_name, u.email as owner_email,
-              (SELECT COUNT(*) FROM documents i WHERE i.sprint_id = d.id AND i.document_type = 'issue') as issue_count,
-              (SELECT COUNT(*) FROM documents i WHERE i.sprint_id = d.id AND i.document_type = 'issue' AND i.properties->>'state' = 'done') as completed_count,
-              (SELECT COUNT(*) FROM documents i WHERE i.sprint_id = d.id AND i.document_type = 'issue' AND i.properties->>'state' IN ('in_progress', 'in_review')) as started_count,
-              (SELECT COALESCE(SUM((i.properties->>'estimate')::numeric), 0) FROM documents i WHERE i.sprint_id = d.id AND i.document_type = 'issue') as total_estimate_hours,
-              (SELECT COUNT(*) > 0 FROM documents p WHERE p.parent_id = d.id AND p.document_type = 'sprint_plan') as has_plan,
-              (SELECT COUNT(*) > 0 FROM documents r WHERE r.parent_id = d.id AND r.document_type = 'sprint_retro') as has_retro,
-              (SELECT created_at FROM documents p WHERE p.parent_id = d.id AND p.document_type = 'sprint_plan' LIMIT 1) as plan_created_at,
-              (SELECT created_at FROM documents r WHERE r.parent_id = d.id AND r.document_type = 'sprint_retro' LIMIT 1) as retro_created_at
+              (SELECT COUNT(*) FROM documents i
+               JOIN document_associations ida ON ida.document_id = i.id AND ida.related_id = d.id AND ida.relationship_type = 'sprint'
+               WHERE i.document_type = 'issue') as issue_count,
+              (SELECT COUNT(*) FROM documents i
+               JOIN document_associations ida ON ida.document_id = i.id AND ida.related_id = d.id AND ida.relationship_type = 'sprint'
+               WHERE i.document_type = 'issue' AND i.properties->>'state' = 'done') as completed_count,
+              (SELECT COUNT(*) FROM documents i
+               JOIN document_associations ida ON ida.document_id = i.id AND ida.related_id = d.id AND ida.relationship_type = 'sprint'
+               WHERE i.document_type = 'issue' AND i.properties->>'state' IN ('in_progress', 'in_review')) as started_count,
+              (SELECT COALESCE(SUM((i.properties->>'estimate')::numeric), 0) FROM documents i
+               JOIN document_associations ida ON ida.document_id = i.id AND ida.related_id = d.id AND ida.relationship_type = 'sprint'
+               WHERE i.document_type = 'issue') as total_estimate_hours,
+              (SELECT COUNT(*) > 0 FROM documents p WHERE p.parent_id = d.id AND p.document_type = 'weekly_plan') as has_plan,
+              (SELECT COUNT(*) > 0 FROM documents r WHERE r.parent_id = d.id AND r.document_type = 'weekly_retro') as has_retro,
+              (SELECT created_at FROM documents p WHERE p.parent_id = d.id AND p.document_type = 'weekly_plan' LIMIT 1) as plan_created_at,
+              (SELECT created_at FROM documents r WHERE r.parent_id = d.id AND r.document_type = 'weekly_retro' LIMIT 1) as retro_created_at
        FROM documents d
+       JOIN document_associations da ON da.document_id = d.id AND da.related_id = $1 AND da.relationship_type = 'program'
        LEFT JOIN users u ON (d.properties->>'owner_id')::uuid = u.id
-       WHERE d.program_id = $1 AND d.document_type = 'sprint'
+       WHERE d.document_type = 'sprint'
          AND ${VISIBILITY_FILTER_SQL('d', '$2', '$3')}
        ORDER BY (d.properties->>'sprint_number')::int ASC`,
       [id, userId, isAdmin]
@@ -521,6 +578,7 @@ router.get('/:id/sprints', authMiddleware, async (req: Request, res: Response) =
         id: row.id,
         name: row.name,
         sprint_number: props.sprint_number || 1,
+        status: props.status || 'planning',  // Default to 'planning' for sprints without status
         owner: row.owner_id ? {
           id: row.owner_id,
           name: row.owner_name,
@@ -534,18 +592,300 @@ router.get('/:id/sprints', authMiddleware, async (req: Request, res: Response) =
         has_retro: row.has_retro === true || row.has_retro === 't',
         plan_created_at: row.plan_created_at || null,
         retro_created_at: row.retro_created_at || null,
-        // Sprint goal (concise objective, separate from hypothesis)
-        goal: props.goal || null,
+        // Plan tracking - what will we learn/validate?
+        plan: props.plan || null,
       };
     });
 
     res.json({
       workspace_sprint_start_date: sprintStartDate,
-      sprints,
+      weeks: sprints,
     });
   } catch (err) {
     console.error('Get program sprints error:', err);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============== Program Merge ==============
+
+// Merge preview - returns counts of entities that will be moved
+router.get('/:id/merge-preview', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const sourceId = req.params.id;
+    const targetId = req.query.target_id as string;
+    const userId = req.userId!;
+    const workspaceId = req.workspaceId!;
+
+    if (!targetId) {
+      res.status(400).json({ error: 'target_id query parameter is required' });
+      return;
+    }
+
+    if (sourceId === targetId) {
+      res.status(400).json({ error: 'Cannot merge a program into itself' });
+      return;
+    }
+
+    const { isAdmin } = await getVisibilityContext(userId, workspaceId);
+
+    // Fetch both programs
+    const programsResult = await pool.query(
+      `SELECT id, title, properties, archived_at
+       FROM documents
+       WHERE id = ANY($1) AND workspace_id = $2 AND document_type = 'program'
+         AND ${VISIBILITY_FILTER_SQL('documents', '$3', '$4')}`,
+      [[sourceId, targetId], workspaceId, userId, isAdmin]
+    );
+
+    const sourceProgram = programsResult.rows.find(r => r.id === sourceId);
+    const targetProgram = programsResult.rows.find(r => r.id === targetId);
+
+    if (!sourceProgram) {
+      res.status(404).json({ error: 'Source program not found' });
+      return;
+    }
+    if (!targetProgram) {
+      res.status(404).json({ error: 'Target program not found' });
+      return;
+    }
+    if (sourceProgram.archived_at) {
+      res.status(400).json({ error: 'Source program is archived' });
+      return;
+    }
+    if (targetProgram.archived_at) {
+      res.status(400).json({ error: 'Target program is archived' });
+      return;
+    }
+
+    // Count child entities via document_associations
+    const countsResult = await pool.query(
+      `SELECT d.document_type, COUNT(*) as count
+       FROM documents d
+       JOIN document_associations da ON da.document_id = d.id AND da.related_id = $1 AND da.relationship_type = 'program'
+       GROUP BY d.document_type`,
+      [sourceId]
+    );
+
+    // Count direct child documents (parent_id pointing at source program)
+    const childDocsResult = await pool.query(
+      `SELECT COUNT(*) as count FROM documents WHERE parent_id = $1`,
+      [sourceId]
+    );
+
+    const counts: Record<string, number> = {
+      projects: 0,
+      issues: 0,
+      sprints: 0,
+      wikis: parseInt(childDocsResult.rows[0]?.count) || 0,
+    };
+
+    for (const row of countsResult.rows) {
+      if (row.document_type === 'project') counts.projects = parseInt(row.count);
+      else if (row.document_type === 'issue') counts.issues = parseInt(row.count);
+      else if (row.document_type === 'sprint') counts.sprints = parseInt(row.count);
+    }
+
+    // Check for conflicts
+    const conflicts: Array<{ type: string; message: string }> = [];
+    const sourcePrefix = sourceProgram.properties?.prefix;
+    const targetPrefix = targetProgram.properties?.prefix;
+    if (sourcePrefix && targetPrefix) {
+      conflicts.push({
+        type: 'prefix_conflict',
+        message: `Both programs have prefixes set (source: "${sourcePrefix}", target: "${targetPrefix}"). The source prefix will be cleared during merge.`,
+      });
+    }
+
+    res.json({
+      source: { id: sourceProgram.id, name: sourceProgram.title },
+      target: { id: targetProgram.id, name: targetProgram.title },
+      counts,
+      conflicts,
+    });
+  } catch (err) {
+    console.error('Merge preview error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Merge execution - re-parents all children, archives source
+const mergeProgramSchema = z.object({
+  target_id: z.string().uuid(),
+  confirm_name: z.string().min(1),
+});
+
+router.post('/:id/merge', authMiddleware, async (req: Request, res: Response) => {
+  const client = await pool.connect();
+  try {
+    const sourceId = String(req.params.id);
+    const userId = req.userId!;
+    const workspaceId = req.workspaceId!;
+
+    const parsed = mergeProgramSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', details: parsed.error.errors });
+      return;
+    }
+
+    const { target_id: targetId, confirm_name: confirmName } = parsed.data;
+
+    if (sourceId === targetId) {
+      res.status(400).json({ error: 'Cannot merge a program into itself' });
+      return;
+    }
+
+    const { isAdmin } = await getVisibilityContext(userId, workspaceId);
+
+    // Fetch both programs
+    const programsResult = await pool.query(
+      `SELECT id, title, properties, archived_at
+       FROM documents
+       WHERE id = ANY($1) AND workspace_id = $2 AND document_type = 'program'
+         AND ${VISIBILITY_FILTER_SQL('documents', '$3', '$4')}`,
+      [[sourceId, targetId], workspaceId, userId, isAdmin]
+    );
+
+    const sourceProgram = programsResult.rows.find(r => r.id === sourceId);
+    const targetProgram = programsResult.rows.find(r => r.id === targetId);
+
+    if (!sourceProgram) {
+      res.status(404).json({ error: 'Source program not found' });
+      return;
+    }
+    if (!targetProgram) {
+      res.status(404).json({ error: 'Target program not found' });
+      return;
+    }
+    if (sourceProgram.archived_at) {
+      res.status(400).json({ error: 'Source program is archived' });
+      return;
+    }
+    if (targetProgram.archived_at) {
+      res.status(400).json({ error: 'Target program is archived' });
+      return;
+    }
+
+    // Type-to-confirm safeguard
+    if (confirmName !== sourceProgram.title) {
+      res.status(409).json({ error: 'Confirmation name does not match the source program name' });
+      return;
+    }
+
+    await client.query('BEGIN');
+
+    // 1. Get all child document IDs before re-parenting (for history logging)
+    const childrenResult = await client.query(
+      `SELECT da.document_id, d.document_type
+       FROM document_associations da
+       JOIN documents d ON d.id = da.document_id
+       WHERE da.related_id = $1 AND da.relationship_type = 'program'`,
+      [sourceId]
+    );
+
+    // 2. Re-parent all document_associations from source to target
+    //    First, remove source associations where the child already has a target association
+    //    (prevents unique constraint violation on (document_id, related_id, relationship_type))
+    await client.query(
+      `DELETE FROM document_associations
+       WHERE related_id = $1 AND relationship_type = 'program'
+         AND document_id IN (
+           SELECT document_id FROM document_associations
+           WHERE related_id = $2 AND relationship_type = 'program'
+         )`,
+      [sourceId, targetId]
+    );
+
+    //    Then update remaining source associations to point to target
+    const reParentResult = await client.query(
+      `UPDATE document_associations
+       SET related_id = $1
+       WHERE related_id = $2 AND relationship_type = 'program'`,
+      [targetId, sourceId]
+    );
+
+    // 3. Re-parent all direct children (parent_id pointing at source)
+    const childReParentResult = await client.query(
+      `UPDATE documents SET parent_id = $1 WHERE parent_id = $2`,
+      [targetId, sourceId]
+    );
+
+    // 4. Log history for each moved entity (using client, not pool, to stay in transaction)
+    for (const child of childrenResult.rows) {
+      await client.query(
+        `INSERT INTO document_history (document_id, field, old_value, new_value, changed_by)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          child.document_id,
+          'belongs_to',
+          JSON.stringify([{ id: sourceId, type: 'program' }]),
+          JSON.stringify([{ id: targetId, type: 'program' }]),
+          userId,
+        ]
+      );
+    }
+
+    // 5. Store merge metadata in source program properties and archive it
+    const mergedProps = {
+      ...(sourceProgram.properties || {}),
+      merged_into_id: targetId,
+      merged_at: new Date().toISOString(),
+      merged_by: userId,
+    };
+
+    await client.query(
+      `UPDATE documents
+       SET properties = $1, archived_at = NOW(), updated_at = NOW()
+       WHERE id = $2`,
+      [JSON.stringify(mergedProps), sourceId]
+    );
+
+    // 6. Log audit event
+    await logAuditEvent({
+      workspaceId,
+      actorUserId: userId,
+      action: 'program.merge',
+      resourceType: 'program',
+      resourceId: sourceId,
+      details: {
+        source_id: sourceId,
+        source_name: sourceProgram.title,
+        target_id: targetId,
+        target_name: targetProgram.title,
+        entities_moved: {
+          associations: reParentResult.rowCount,
+          child_docs: childReParentResult.rowCount,
+        },
+      },
+      req,
+    });
+
+    await client.query('COMMIT');
+
+    // Return updated target program
+    const result = await pool.query(
+      `SELECT d.id, d.title, d.properties, d.archived_at, d.created_at, d.updated_at,
+              COALESCE((d.properties->>'owner_id')::uuid, d.created_by) as owner_id,
+              u.name as owner_name, u.email as owner_email,
+              (SELECT COUNT(*) FROM documents i
+               JOIN document_associations da ON da.document_id = i.id AND da.related_id = d.id AND da.relationship_type = 'program'
+               WHERE i.document_type = 'issue') as issue_count,
+              (SELECT COUNT(*) FROM documents s
+               JOIN document_associations da ON da.document_id = s.id AND da.related_id = d.id AND da.relationship_type = 'program'
+               WHERE s.document_type = 'sprint') as sprint_count
+       FROM documents d
+       LEFT JOIN users u ON u.id = COALESCE((d.properties->>'owner_id')::uuid, d.created_by)
+       WHERE d.id = $1 AND d.document_type = 'program'`,
+      [targetId]
+    );
+
+    res.json(extractProgramFromRow(result.rows[0]));
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Merge program error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    client.release();
   }
 });
 

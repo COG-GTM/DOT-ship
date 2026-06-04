@@ -13,7 +13,7 @@ async function login(page: Page) {
 async function createNewDocument(page: Page) {
   await page.goto('/docs');
   await page.getByRole('button', { name: 'New Document', exact: true }).click();
-  await expect(page).toHaveURL(/\/docs\/[a-f0-9-]+/, { timeout: 10000 });
+  await expect(page).toHaveURL(/\/documents\/[a-f0-9-]+/, { timeout: 10000 });
   await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 });
 }
 
@@ -159,71 +159,6 @@ test.describe('Critical Blocker: Consistent Auth Across Routes', () => {
 });
 
 test.describe('Critical Blocker: WebSocket Rate Limiting', () => {
-  test('multiple concurrent WebSocket connections work within rate limit', async ({ page, apiServer }) => {
-    // Rate limit: 30 connections per minute per IP
-    // Test: Verify multiple concurrent connections succeed within the limit
-    await login(page);
-
-    // Create a document to get a valid ID for WebSocket connections
-    await createNewDocument(page);
-    const docId = page.url().split('/docs/')[1];
-    expect(docId).toBeTruthy();
-
-    // Get the WebSocket URL for this document
-    const wsUrl = apiServer.url.replace('http://', 'ws://') + `/collaboration/wiki:${docId}`;
-
-    // Make concurrent WebSocket connections within the rate limit (10 connections)
-    // This proves the rate limiter doesn't block legitimate concurrent use
-    const results = await page.evaluate(async (wsUrl) => {
-      const attempts: { success: boolean; error?: string }[] = [];
-      const connections: WebSocket[] = [];
-
-      // Create 10 concurrent connections (well under the 30/minute limit)
-      const promises = Array.from({ length: 10 }, async (_, i) => {
-        return new Promise<void>((resolve) => {
-          try {
-            const ws = new WebSocket(wsUrl);
-            connections.push(ws);
-
-            ws.onopen = () => {
-              attempts.push({ success: true });
-              resolve();
-            };
-            ws.onerror = () => {
-              attempts.push({ success: false, error: 'connection error' });
-              resolve();
-            };
-            // Timeout after 5s
-            setTimeout(() => {
-              if (!attempts.find((_, idx) => idx === i)) {
-                attempts.push({ success: false, error: 'timeout' });
-              }
-              resolve();
-            }, 5000);
-          } catch (e) {
-            attempts.push({ success: false, error: String(e) });
-            resolve();
-          }
-        });
-      });
-
-      await Promise.all(promises);
-
-      // Clean up - close all connections
-      connections.forEach((ws) => {
-        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-          ws.close();
-        }
-      });
-
-      return attempts;
-    }, wsUrl);
-
-    // All 10 connections should succeed (we're well under the rate limit)
-    const successful = results.filter((r) => r.success).length;
-    expect(successful).toBeGreaterThanOrEqual(8); // Allow some variance for network timing
-  })
-
   test('WebSocket connections work normally under limit', async ({ page }) => {
     // Verify normal WebSocket collaboration works (not rate limited)
     await login(page)

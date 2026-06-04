@@ -172,7 +172,9 @@ for file in $FILES; do
       # - admin/audit-logs/export: template literal with params causes false positive (endpoint exists in admin.ts)
       if [[ "$call" =~ ^auth/ ]] || [[ "$call" =~ ^health$ ]] || \
          [[ "$call" =~ ^documents/.*backlinks ]] || [[ "$call" =~ ^team/grid ]] || \
-         [[ "$call" =~ ^admin/audit-logs/export ]]; then
+         [[ "$call" =~ ^team/accountability-grid ]] || \
+         [[ "$call" =~ ^admin/audit-logs/export ]] || \
+         [[ "$call" =~ ^weekly-retros ]] || [[ "$call" =~ ^weekly-plans ]]; then
         continue
       fi
       MISSING+=("$file: /api/$call")

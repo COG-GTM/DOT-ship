@@ -36,11 +36,18 @@ Thumbs.db
 # Ralph loop local state
 .claude/ralph-loop.local.md
 
+# PRD test enforcement timestamp (written by bash-command-validator.sh, read by prd-enforcement.sh)
+.claude/.last-test-run
+
 # Claude agents
 .claude/agents/
 
 # Playwright MCP screenshots
 .playwright-mcp/
+
+# Evidence/verification screenshots
+evidence/
+*.png
 
 # Playwright test artifacts
 playwright-report/
@@ -57,6 +64,10 @@ test-results/
 # Audit artifacts
 .audit
 
+# ShipShape audit: never commit credentials captured during the audit
+shipshape/audit/raw/.api_token
+shipshape/audit/raw/.session_cookie
+
 # Terraform
 terraform/.terraform/
 terraform/.terraform.lock.hcl
@@ -65,6 +76,8 @@ terraform/terraform.tfstate.backup
 terraform/*.tfplan
 terraform/tfplan
 terraform/terraform.tfvars
+terraform/environments/*/terraform.tfvars
+terraform/environments/*/.terraform.lock.hcl
 terraform/bootstrap/.terraform/
 terraform/bootstrap/.terraform.lock.hcl
 terraform/bootstrap/terraform.tfstate
@@ -87,6 +100,7 @@ api/uploads/
 research/
 .research/
 .claude/deploy-logs/
+**/deploy-logs/
 .claude/deploy-config.json
 
 # Deployment artifacts
@@ -97,3 +111,9 @@ vendor/
 
 # SSDF-Helper - Memory Safety Analysis Reports (CUI/ISVI)
 /SSDF-Helper/
+.pr-checklist.json
+.dev-ports
+.claude/settings.local.json
+
+# Vite PWA dev artifacts
+web/dev-dist/

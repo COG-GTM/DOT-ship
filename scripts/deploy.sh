@@ -41,23 +41,25 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # Parse environment argument
 ENV="${1:-}"
-if [[ ! "$ENV" =~ ^(dev|prod)$ ]]; then
-  echo "Usage: $0 <dev|prod>"
+if [[ ! "$ENV" =~ ^(dev|shadow|prod)$ ]]; then
+  echo "Usage: $0 <dev|shadow|prod>"
   echo ""
   echo "Examples:"
   echo "  $0 dev     # Deploy to dev environment"
+  echo "  $0 shadow  # Deploy to shadow environment (UAT)"
   echo "  $0 prod    # Deploy to prod environment"
   exit 1
 fi
 
 # Environment-specific configuration
 # - prod uses existing terraform at root with original app name (ship-api)
-# - dev uses new modular structure with environment-suffixed app name
+# - dev/shadow use new modular structure with environment-suffixed app name
 if [ "$ENV" = "prod" ]; then
   TF_DIR="$PROJECT_ROOT/terraform"
   APP_NAME="ship-api"
   ENV_NAME="ship-api-prod"
 else
+  # dev and shadow both use the modular terraform structure
   TF_DIR="$PROJECT_ROOT/terraform/environments/$ENV"
   APP_NAME="ship-api-${ENV}"
   ENV_NAME="ship-api-${ENV}"
@@ -75,10 +77,20 @@ fi
 S3_BUCKET="${S3_BUCKET:-${DEPLOY_S3_BUCKET:-}}"
 
 if [ -z "$S3_BUCKET" ]; then
-  echo "ERROR: S3_BUCKET not found. Either:"
-  echo "  1. Run 'terraform apply' in terraform/environments/$ENV/ directory"
-  echo "  2. Set DEPLOY_S3_BUCKET environment variable"
-  exit 1
+  echo "S3 bucket not found in Terraform outputs. Running terraform apply..."
+  cd "$TF_DIR"
+
+  # Get state bucket from SSM for backend config
+  TF_STATE_BUCKET=$(aws ssm get-parameter --name /ship/terraform-state-bucket --query Parameter.Value --output text)
+  terraform init -upgrade -backend-config="bucket=$TF_STATE_BUCKET"
+  terraform apply -auto-approve
+  S3_BUCKET=$(terraform output -raw s3_bucket_name)
+  cd "$PROJECT_ROOT"
+
+  if [ -z "$S3_BUCKET" ]; then
+    echo "ERROR: S3_BUCKET still not found after terraform apply"
+    exit 1
+  fi
 fi
 
 echo "=== Ship API Deploy ==="
@@ -174,6 +186,16 @@ zip -r "$BUNDLE" \
   shared/dist \
   shared/package.json \
   -x "*.git*"
+
+# Add .ebextensions and .platform at root level (EB expects them at root, not under api/)
+if [ -d "api/.ebextensions" ]; then
+  echo "Adding .ebextensions to bundle..."
+  (cd api && zip -r "$BUNDLE" .ebextensions)
+fi
+if [ -d "api/.platform" ]; then
+  echo "Adding .platform to bundle..."
+  (cd api && zip -r "$BUNDLE" .platform)
+fi
 
 echo "Bundle: $BUNDLE"
 echo "Contents:"

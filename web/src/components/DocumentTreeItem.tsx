@@ -76,7 +76,7 @@ export function DocumentTreeItem({
         className={cn(
           'group flex items-center gap-1.5 rounded-md px-2 py-1.5 text-sm',
           'hover:bg-border/30 transition-colors',
-          isActive && 'bg-accent/10 text-accent'
+          isActive && 'bg-accent/10 text-accent-bright'
         )}
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
         onMouseEnter={() => setIsHovered(true)}
@@ -102,7 +102,7 @@ export function DocumentTreeItem({
 
         {/* Main navigation link - uses <a> for accessibility and proper href detection */}
         <Link
-          to={`/docs/${document.id}`}
+          to={`/documents/${document.id}`}
           className="flex-1 truncate text-left cursor-pointer"
           aria-current={isActive ? 'page' : undefined}
         >

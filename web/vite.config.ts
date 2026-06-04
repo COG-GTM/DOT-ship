@@ -1,7 +1,9 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import svgr from 'vite-plugin-svgr';
 import { resolve } from 'path';
 import { readFileSync, existsSync } from 'fs';
+import { visualizer } from 'rollup-plugin-visualizer';
 
 // Read API port from environment or .ports file (created by scripts/dev.sh)
 function getApiPort(): number {
@@ -35,10 +37,61 @@ export default defineConfig(({ mode }) => {
       changeOrigin: true,
       ws: true,
     },
+    '/events': {
+      target: `http://localhost:${apiPort}`,
+      changeOrigin: true,
+      ws: true,
+    },
   };
 
+  // Gate the bundle analyzer behind ANALYZE=1 so it never runs in normal builds.
+  // Output goes to web/dist/bundle-stats.html when enabled.
+  const analyze = process.env.ANALYZE === '1';
+
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      analyze && visualizer({
+        filename: 'dist/bundle-stats.html',
+        template: 'treemap',
+        gzipSize: true,
+        brotliSize: true,
+        open: false,
+      }),
+      analyze && visualizer({
+        filename: 'dist/bundle-stats.json',
+        template: 'raw-data',
+        gzipSize: true,
+        brotliSize: true,
+      }),
+      svgr({
+        // Allow importing SVGs as React components with ?react suffix
+        // e.g., import CheckIcon from '@uswds/uswds/dist/img/usa-icons/check.svg?react'
+        svgrOptions: {
+          // Use currentColor for fill to match existing icon patterns
+          plugins: ['@svgr/plugin-svgo', '@svgr/plugin-jsx'],
+          svgoConfig: {
+            plugins: [
+              {
+                name: 'preset-default',
+                params: {
+                  overrides: {
+                    removeViewBox: false,
+                  },
+                },
+              },
+              // Replace hardcoded colors with currentColor
+              {
+                name: 'convertColors',
+                params: {
+                  currentColor: true,
+                },
+              },
+            ],
+          },
+        },
+      }),
+    ],
     resolve: {
       alias: {
         '@': resolve(__dirname, './src'),

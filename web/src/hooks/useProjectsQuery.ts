@@ -18,12 +18,17 @@ export interface Project {
   emoji: string | null;
   // Associations
   program_id: string | null;
-  // Owner info
+  // Owner info (R - Responsible)
   owner: {
     id: string;
     name: string;
     email: string;
   } | null;
+  owner_id?: string | null;
+  // RACI fields
+  accountable_id?: string | null;  // A - Accountable (approver)
+  consulted_ids?: string[];        // C - Consulted
+  informed_ids?: string[];         // I - Informed
   // Counts
   sprint_count: number;
   issue_count: number;
@@ -36,8 +41,40 @@ export interface Project {
   // Completeness flags
   is_complete: boolean | null;
   missing_fields: string[];
+  // Design review tracking
+  has_design_review?: boolean | null;
+  design_review_notes?: string | null;
   // Conversion tracking
   converted_from_id?: string | null;
+}
+
+// Project issue type (subset of Issue for the list)
+export interface ProjectIssue {
+  id: string;
+  title: string;
+  ticket_number: number;
+  state: string;
+  priority: string;
+  assignee_id: string | null;
+  assignee_name: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+}
+
+// Project week type (subset of Week for the list)
+export interface ProjectWeek {
+  id: string;
+  name: string;
+  sprint_number: number;
+  start_date: string | null;
+  end_date: string | null;
+  status: 'planning' | 'active' | 'completed';
+  issue_count: number;
+  completed_count: number;
+  days_remaining: number | null;
 }
 
 // Query keys
@@ -47,6 +84,8 @@ export const projectKeys = {
   list: (filters?: Record<string, unknown>) => [...projectKeys.lists(), filters] as const,
   details: () => [...projectKeys.all, 'detail'] as const,
   detail: (id: string) => [...projectKeys.details(), id] as const,
+  issues: (id: string) => [...projectKeys.detail(id), 'issues'] as const,
+  weeks: (id: string) => [...projectKeys.detail(id), 'weeks'] as const,
 };
 
 // Fetch projects
@@ -63,12 +102,17 @@ async function fetchProjects(): Promise<Project[]> {
 // Create project
 interface CreateProjectData {
   title?: string;
-  owner_id?: string | null;  // Optional - can be unassigned
+  owner_id?: string | null;  // R - Responsible (optional - can be unassigned)
+  accountable_id?: string | null;  // A - Accountable (approver)
+  consulted_ids?: string[];        // C - Consulted
+  informed_ids?: string[];         // I - Informed
   impact?: number | null;
   confidence?: number | null;
   ease?: number | null;
   color?: string;
   program_id?: string;
+  plan?: string;
+  target_date?: string;
 }
 
 async function createProjectApi(data: CreateProjectData): Promise<Project> {
@@ -251,8 +295,14 @@ export function useDeleteProject() {
 
 // Options for creating a project
 export interface CreateProjectOptions {
-  owner_id?: string | null;  // Optional - can be unassigned
+  title?: string;
+  owner_id?: string | null;  // R - Responsible (optional - can be unassigned)
+  accountable_id?: string | null;  // A - Accountable (approver)
+  consulted_ids?: string[];        // C - Consulted
+  informed_ids?: string[];         // I - Informed
   program_id?: string;
+  plan?: string;
+  target_date?: string;
 }
 
 // Compatibility hook that matches the context interface
@@ -299,4 +349,46 @@ export function useProjects() {
     deleteProject,
     refreshProjects,
   };
+}
+
+// Fetch project issues
+async function fetchProjectIssues(projectId: string): Promise<ProjectIssue[]> {
+  const res = await apiGet(`/api/projects/${projectId}/issues`);
+  if (!res.ok) {
+    const error = new Error('Failed to fetch project issues') as Error & { status: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
+// Hook to get project issues
+export function useProjectIssuesQuery(projectId: string | undefined) {
+  return useQuery({
+    queryKey: projectId ? projectKeys.issues(projectId) : ['disabled'],
+    queryFn: () => fetchProjectIssues(projectId!),
+    enabled: !!projectId,
+    staleTime: 1000 * 60 * 2, // 2 minutes
+  });
+}
+
+// Fetch project weeks
+async function fetchProjectWeeks(projectId: string): Promise<ProjectWeek[]> {
+  const res = await apiGet(`/api/projects/${projectId}/weeks`);
+  if (!res.ok) {
+    const error = new Error('Failed to fetch project weeks') as Error & { status: number };
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
+// Hook to get project weeks
+export function useProjectWeeksQuery(projectId: string | undefined) {
+  return useQuery({
+    queryKey: projectId ? projectKeys.weeks(projectId) : ['disabled'],
+    queryFn: () => fetchProjectWeeks(projectId!),
+    enabled: !!projectId,
+    staleTime: 1000 * 60 * 2, // 2 minutes
+  });
 }

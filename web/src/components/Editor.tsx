@@ -18,9 +18,11 @@ import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import * as Y from 'yjs';
 import { WebsocketProvider } from 'y-websocket';
+import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { cn } from '@/lib/cn';
 import { Tooltip } from '@/components/ui/Tooltip';
+import { ScrollFade } from '@/components/ui/ScrollFade';
 import { apiPost } from '@/lib/api';
 import { createSlashCommands } from './editor/SlashCommands';
 import { DocumentEmbed } from './editor/DocumentEmbed';
@@ -31,6 +33,13 @@ import { FileAttachmentExtension } from './editor/FileAttachment';
 import { DetailsExtension, DetailsSummary, DetailsContent } from './editor/DetailsExtension';
 import { EmojiExtension } from './editor/EmojiExtension';
 import { TableOfContentsExtension } from './editor/TableOfContents';
+import { HypothesisBlockExtension } from './editor/HypothesisBlockExtension';
+import { CommentMark } from './editor/CommentMark';
+import { CommentDisplayExtension } from './editor/CommentDisplay';
+import { AIScoringDisplayExtension } from './editor/AIScoringDisplay';
+import { PlanReferenceBlockExtension } from './editor/PlanReferenceBlock';
+import { useCommentsQuery, useCreateComment, useUpdateComment } from '@/hooks/useCommentsQuery';
+import { BubbleMenu } from '@tiptap/react';
 import 'tippy.js/dist/tippy.css';
 
 // Create lowlight instance with common languages
@@ -42,6 +51,8 @@ interface EditorProps {
   userColor?: string;
   onTitleChange?: (title: string) => void;
   initialTitle?: string;
+  /** Whether the title is read-only (e.g., for weekly plans/retros with computed titles) */
+  titleReadOnly?: boolean;
   onBack?: () => void;
   /** Label for back button (e.g., parent document title) */
   backLabel?: string;
@@ -51,6 +62,8 @@ interface EditorProps {
   placeholder?: string;
   /** Badge to show in header (e.g., issue number) */
   headerBadge?: React.ReactNode;
+  /** Breadcrumbs to show above the title */
+  breadcrumbs?: React.ReactNode;
   /** Sidebar content (e.g., issue properties) */
   sidebar?: React.ReactNode;
   /** Callback to create a sub-document (for slash commands) */
@@ -65,6 +78,16 @@ interface EditorProps {
   documentType?: string;
   /** Callback when the document is converted to a different type by another user */
   onDocumentConverted?: (newDocId: string, newDocType: 'issue' | 'project') => void;
+  /** Callback when plan block content changes (for sprint documents) */
+  onPlanChange?: (plan: string) => void;
+  /** Banner content rendered between the title and editor content (e.g., AI quality check) */
+  contentBanner?: React.ReactNode;
+  /** Callback when editor content changes (debounced). Receives TipTap JSON content. */
+  onContentChange?: (content: Record<string, unknown>) => void;
+  /** AI scoring analysis data to render as inline decorations */
+  aiScoringAnalysis?: { planAnalysis?: unknown; retroAnalysis?: unknown } | null;
+  /** Suffix displayed after the title in the header (e.g., author name) */
+  titleSuffix?: string;
 }
 
 type SyncStatus = 'connecting' | 'cached' | 'synced' | 'disconnected';
@@ -98,17 +121,56 @@ function extractDocumentMentionIds(content: JSONContent): string[] {
   return [...new Set(mentionIds)]; // Deduplicate
 }
 
+// Extract hypothesis text from hypothesisBlock node in TipTap JSON content
+function extractHypothesisText(content: JSONContent): string | null {
+  let hypothesisText: string | null = null;
+
+  function traverse(node: JSONContent) {
+    if (node.type === 'hypothesisBlock') {
+      // Extract plain text from hypothesis block content
+      const textParts: string[] = [];
+      const extractText = (n: JSONContent) => {
+        if (n.type === 'text' && n.text) {
+          textParts.push(n.text);
+        }
+        if (n.content) {
+          for (const child of n.content) {
+            extractText(child);
+          }
+        }
+      };
+      if (node.content) {
+        for (const child of node.content) {
+          extractText(child);
+        }
+      }
+      hypothesisText = textParts.join('');
+      return; // Stop after first hypothesis block
+    }
+    if (node.content) {
+      for (const child of node.content) {
+        traverse(child);
+      }
+    }
+  }
+
+  traverse(content);
+  return hypothesisText;
+}
+
 export function Editor({
   documentId,
   userName,
   userColor,
   onTitleChange,
   initialTitle = 'Untitled',
+  titleReadOnly = false,
   onBack,
   backLabel,
   roomPrefix = 'doc',
   placeholder = 'Start writing...',
   headerBadge,
+  breadcrumbs,
   sidebar,
   onCreateSubDocument,
   onNavigateToDocument,
@@ -116,9 +178,14 @@ export function Editor({
   secondaryHeader,
   documentType,
   onDocumentConverted,
+  onPlanChange,
+  contentBanner,
+  onContentChange,
+  aiScoringAnalysis,
+  titleSuffix,
 }: EditorProps) {
   const [title, setTitle] = useState(initialTitle === 'Untitled' ? '' : initialTitle);
-  const titleInputRef = useRef<HTMLInputElement>(null);
+  const titleInputRef = useRef<HTMLTextAreaElement>(null);
 
   // Track if user has made local changes (to prevent stale server responses from overwriting)
   const hasLocalChangesRef = useRef(false);
@@ -149,6 +216,15 @@ export function Editor({
       lastSyncedTitleRef.current = initialTitle;
     }
   }, [initialTitle, title]);
+
+  // Auto-resize title textarea when title changes or on mount
+  useEffect(() => {
+    const el = titleInputRef.current;
+    if (el) {
+      el.style.height = 'auto';
+      el.style.height = `${el.scrollHeight}px`;
+    }
+  }, [title]);
   const [provider, setProvider] = useState<WebsocketProvider | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('connecting');
   const [isBrowserOnline, setIsBrowserOnline] = useState(navigator.onLine);
@@ -157,6 +233,10 @@ export function Editor({
     return localStorage.getItem('ship:rightSidebarCollapsed') === 'true';
   });
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
+
+  // AbortController for cancelling async uploads (images, files) when navigating away
+  // This prevents uploads from completing into a different document after navigation
+  const imageUploadAbortRef = useRef<AbortController>(new AbortController());
 
   // Find portal target for properties sidebar (for proper landmark order)
   useLayoutEffect(() => {
@@ -184,10 +264,21 @@ export function Editor({
   const color = userColor || stringToColor(userName);
 
   // Auto-focus and select title if "Untitled" (new document)
+  // Uses double requestAnimationFrame to run AFTER useFocusOnNavigate's
+  // requestAnimationFrame (which focuses #main-content for accessibility).
+  // This ensures title gets focus for new docs while preserving a11y flow.
   useEffect(() => {
-    if (titleInputRef.current && (!title || title === 'Untitled')) {
-      titleInputRef.current.focus();
-      titleInputRef.current.select();
+    if (!title || title === 'Untitled') {
+      // First rAF: queued alongside useFocusOnNavigate's rAF
+      // Second rAF: runs after useFocusOnNavigate completes
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (titleInputRef.current) {
+            titleInputRef.current.focus();
+            titleInputRef.current.select();
+          }
+        });
+      });
     }
   }, []);
 
@@ -196,6 +287,8 @@ export function Editor({
     let wsProvider: WebsocketProvider | null = null;
     let hasCachedContent = false;
     let cancelled = false;
+    // Store the updateUsers callback so we can properly remove it on cleanup
+    let updateUsersCallback: (() => void) | null = null;
 
     // Create IndexedDB persistence for content caching
     // This loads cached content BEFORE WebSocket connects for instant navigation
@@ -239,11 +332,58 @@ export function Editor({
       const wsUrl = apiUrl
         ? apiUrl.replace(/^http/, 'ws') + '/collaboration'
         : `${wsProtocol}//${window.location.host}/collaboration`;
+      // Listen for custom "clear cache" message (type 3) from server
+      // This is sent when the server loaded content fresh from JSON (API update/create)
+      // We need to clear IndexedDB to prevent stale cached content from merging
+      const MESSAGE_TYPE_CLEAR_CACHE = 3;
+      const handleRawMessage = (event: MessageEvent) => {
+        if (cancelled) return;
+        try {
+          const data = new Uint8Array(event.data);
+          if (data.length > 0 && data[0] === MESSAGE_TYPE_CLEAR_CACHE) {
+            console.log(`[Editor] Received cache clear signal for ${documentId}, clearing IndexedDB`);
+            // Clear the Y.Doc to remove any cached content before server sync
+            ydoc.transact(() => {
+              const fragment = ydoc.getXmlFragment('default');
+              // Delete all content from the fragment
+              while (fragment.length > 0) {
+                fragment.delete(0, 1);
+              }
+            });
+            // Also clear IndexedDB for future visits
+            indexeddbProvider.clearData().then(() => {
+              console.log(`[Editor] IndexedDB cache cleared for ${documentId} (fresh from JSON)`);
+              hasCachedContent = false;
+            }).catch((err) => {
+              console.error(`[Editor] Failed to clear IndexedDB cache for ${documentId}:`, err);
+            });
+          }
+        } catch {
+          // Ignore errors from processing non-binary messages
+        }
+      };
+
+      // Create WebSocket provider with connect: false so we can add listener first
       wsProvider = new WebsocketProvider(wsUrl, `${roomPrefix}:${documentId}`, ydoc, {
-        connect: true,
+        connect: false,
       });
 
+      // Add raw message listener before connecting
+      // y-websocket creates its own WebSocket, we need to hook into it
+      const originalConnect = wsProvider.connect.bind(wsProvider);
+      wsProvider.connect = () => {
+        originalConnect();
+        // Add listener to the new WebSocket
+        if (wsProvider?.ws) {
+          wsProvider.ws.addEventListener('message', handleRawMessage);
+        }
+      };
+
+      // Now connect
+      wsProvider.connect();
+
       wsProvider.on('status', (event: { status: string }) => {
+        if (cancelled) return; // Don't update state if effect was cleaned up
         console.log(`[Editor] WebSocket status: ${event.status} for ${roomPrefix}:${documentId}`);
         if (event.status === 'connected') {
           setSyncStatus('synced');
@@ -253,8 +393,9 @@ export function Editor({
         }
       });
 
-      // Handle WebSocket close events to detect access revoked or document converted
+      // Handle WebSocket close events to detect access revoked, document converted, or content updated
       wsProvider.on('connection-close', (event: CloseEvent | null) => {
+        if (cancelled) return; // Don't process if effect was cleaned up
         if (event?.code === 4403) {
           console.log(`[Editor] Access revoked for document ${documentId}`);
           // Disable auto-reconnect since access was revoked
@@ -282,10 +423,22 @@ export function Editor({
             alert('This document was converted. Please refresh to view the new document.');
             onBack?.();
           }
+        } else if (event?.code === 4101) {
+          // Content updated via API - clear IndexedDB cache to prevent stale content merge
+          console.log(`[Editor] Content updated via API for ${documentId}, clearing IndexedDB cache`);
+          // Clear the IndexedDB cache so stale content doesn't merge with new content
+          indexeddbProvider.clearData().then(() => {
+            console.log(`[Editor] IndexedDB cache cleared for ${documentId}`);
+            hasCachedContent = false;
+          }).catch((err) => {
+            console.error(`[Editor] Failed to clear IndexedDB cache for ${documentId}:`, err);
+          });
+          // y-websocket will auto-reconnect, now with fresh state from server
         }
       });
 
       wsProvider.on('sync', (isSynced: boolean) => {
+        if (cancelled) return; // Don't update state if effect was cleaned up
         console.log(`[Editor] WebSocket sync: ${isSynced} for ${roomPrefix}:${documentId}`);
         if (isSynced) {
           setSyncStatus('synced');
@@ -298,38 +451,67 @@ export function Editor({
         color: color,
       });
 
-      // Track connected users
-      const updateUsers = () => {
+      // Track connected users - store callback reference for proper cleanup
+      // Deduplicate by user name to handle race conditions where stale awareness
+      // states exist briefly during page refresh (before old connection cleanup)
+      updateUsersCallback = () => {
+        if (cancelled) return; // Don't update state if effect was cleaned up
         const users: { name: string; color: string }[] = [];
+        const seenNames = new Set<string>();
         wsProvider!.awareness.getStates().forEach((state) => {
-          if (state.user) {
+          if (state.user && !seenNames.has(state.user.name)) {
+            seenNames.add(state.user.name);
             users.push(state.user);
           }
         });
         setConnectedUsers(users);
       };
 
-      wsProvider.awareness.on('change', updateUsers);
-      updateUsers();
+      wsProvider.awareness.on('change', updateUsersCallback);
+      updateUsersCallback();
 
-      setProvider(wsProvider);
+      if (!cancelled) {
+        setProvider(wsProvider);
+      }
     });
 
     return () => {
       cancelled = true;
+
+      // Abort any pending image uploads to prevent them from completing into wrong document
+      imageUploadAbortRef.current.abort();
+      // Create a new AbortController for the next document
+      imageUploadAbortRef.current = new AbortController();
+
       if (wsProvider) {
-        wsProvider.awareness.off('change', () => {});
+        // CRITICAL: Clear awareness state before destroying to prevent ghost cursors
+        // This notifies other clients that this user has left the document
+        wsProvider.awareness.setLocalState(null);
+        // Remove the awareness change listener using the stored callback reference
+        if (updateUsersCallback) {
+          wsProvider.awareness.off('change', updateUsersCallback);
+        }
+        // Destroy provider (disconnects WebSocket)
         wsProvider.destroy();
       }
+      // Destroy IndexedDB persistence
       indexeddbProvider.destroy();
+      // Clear provider state
+      setProvider(null);
+      setConnectedUsers([]);
     };
   }, [documentId, userName, color, ydoc, roomPrefix, onBack, onDocumentConverted]);
 
   // Create slash commands extension (memoized to avoid recreation)
+  // documentId is in deps to ensure fresh AbortSignal when switching documents
   const slashCommandsExtension = useMemo(() => {
-    if (!onCreateSubDocument) return null;
-    return createSlashCommands({ onCreateSubDocument, onNavigateToDocument, documentType });
-  }, [onCreateSubDocument, onNavigateToDocument, documentType]);
+    return createSlashCommands({
+      onCreateSubDocument,
+      onNavigateToDocument,
+      documentType,
+      abortSignal: imageUploadAbortRef.current.signal,
+    });
+  }, [onCreateSubDocument, onNavigateToDocument, documentType, documentId]);
 
   // Create mention extension (memoized to avoid recreation)
   const mentionExtension = useMemo(() => {
@@ -344,6 +526,17 @@ export function Editor({
       },
     });
   }, [onNavigateToDocument]);
+
+  // Comments - fetch and manage inline comments
+  const { data: comments = [] } = useCommentsQuery(documentId);
+  const createComment = useCreateComment(documentId);
+  const updateComment = useUpdateComment(documentId);
+  const [pendingCommentId, setPendingCommentId] = useState<string | null>(null);
+
+  // Handle adding a new comment (called from keyboard shortcut, bubble menu, context menu)
+  const handleAddComment = useCallback((commentId: string) => {
+    setPendingCommentId(commentId);
+  }, []);
 
   // Build extensions - only include CollaborationCursor when provider is ready
   const baseExtensions = [
@@ -363,7 +556,7 @@ export function Editor({
     Link.configure({
       openOnClick: true,
       HTMLAttributes: {
-        class: 'text-accent hover:underline cursor-pointer',
+        class: 'text-accent-bright hover:underline cursor-pointer',
       },
     }),
     ResizableImage,
@@ -392,9 +585,10 @@ export function Editor({
       },
     }),
     ImageUploadExtension.configure({
-      onUploadStart: (file) => console.log('Upload started:', file.name),
-      onUploadComplete: (url) => console.log('Upload complete:', url),
+      onUploadStart: () => {},
+      onUploadComplete: () => {},
       onUploadError: (error) => console.error('Upload error:', error),
+      abortController: imageUploadAbortRef.current,
     }),
     FileAttachmentExtension,
     DocumentEmbed,
@@ -405,7 +599,12 @@ export function Editor({
     mentionExtension,
     EmojiExtension,
     TableOfContentsExtension,
-    ...(slashCommandsExtension ? [slashCommandsExtension] : []),
+    HypothesisBlockExtension,
+    CommentMark.configure({ onAddComment: handleAddComment }),
+    CommentDisplayExtension,
+    AIScoringDisplayExtension,
+    PlanReferenceBlockExtension,
+    slashCommandsExtension,
   ];
 
   const extensions = provider
@@ -426,6 +625,86 @@ export function Editor({
       },
     },
   }, [provider, documentType]);
+
+  // Refs for stable comment callbacks (avoid re-render loops)
+  const commentsRef = useRef(comments);
+  commentsRef.current = comments;
+  const createCommentRef = useRef(createComment);
+  createCommentRef.current = createComment;
+  const updateCommentRef = useRef(updateComment);
+  updateCommentRef.current = updateComment;
+
+  // Sync comment data into the CommentDisplay extension storage
+  useEffect(() => {
+    if (!editor) return;
+    const ext = editor.extensionManager.extensions.find(e => e.name === 'commentDisplay');
+    if (!ext) return;
+
+    ext.storage.comments = comments;
+    ext.storage.pendingCommentId = pendingCommentId;
+    ext.storage.onReply = (commentId: string, content: string) => {
+      const rootComment = commentsRef.current.find(c => c.comment_id === commentId && !c.parent_id);
+      createCommentRef.current.mutate({
+        comment_id: commentId,
+        content,
+        parent_id: rootComment?.id,
+      });
+    };
+    ext.storage.onResolve = (commentId: string, resolved: boolean) => {
+      const rootComment = commentsRef.current.find(c => c.comment_id === commentId && !c.parent_id);
+      if (rootComment) {
+        updateCommentRef.current.mutate({
+          commentId: rootComment.id,
+          resolved_at: resolved ? new Date().toISOString() : null,
+        });
+        // Don't remove the mark -- keep it so the collapsed indicator knows where to render.
+        // The CommentDisplay plugin handles showing resolved vs unresolved states.
+      }
+    };
+    ext.storage.onSubmitComment = (commentId: string, content: string) => {
+      createCommentRef.current.mutate({ comment_id: commentId, content });
+      setPendingCommentId(null);
+    };
+    ext.storage.onCancelComment = (commentId: string) => {
+      editor.commands.unsetComment(commentId);
+      setPendingCommentId(null);
+    };
+
+    // Force ProseMirror to re-evaluate decorations
+    // Delay to ensure DOM is ready and avoid init-time errors
+    const timer = setTimeout(() => {
+      if (!editor.isDestroyed && editor.view) {
+        try {
+          editor.view.updateState(editor.view.state);
+        } catch {
+          // Ignore DOM errors during initialization
+        }
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [editor, comments, pendingCommentId]);
+
+  // Sync AI scoring data into the AIScoringDisplay extension storage
+  useEffect(() => {
+    if (!editor) return;
+    const ext = editor.extensionManager.extensions.find(e => e.name === 'aiScoringDisplay');
+    if (!ext) return;
+
+    ext.storage.planAnalysis = aiScoringAnalysis?.planAnalysis || null;
+    ext.storage.retroAnalysis = aiScoringAnalysis?.retroAnalysis || null;
+
+    // Force ProseMirror to re-evaluate decorations
+    const timer = setTimeout(() => {
+      if (!editor.isDestroyed && editor.view) {
+        try {
+          editor.view.updateState(editor.view.state);
+        } catch {
+          // Ignore DOM errors during initialization
+        }
+      }
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [editor, aiScoringAnalysis]);
 
   // Sync document links when editor content changes (for backlinks feature)
   const lastSyncedLinksRef = useRef<string>('');
@@ -470,8 +749,64 @@ export function Editor({
     };
   }, [editor, documentId]);
 
+  // Notify parent of content changes (debounced 3s) for AI quality analysis etc.
+  useEffect(() => {
+    if (!editor || !onContentChange) return;
+
+    let debounceTimer: ReturnType<typeof setTimeout>;
+    const debouncedNotify = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        const json = editor.getJSON();
+        onContentChange(json as Record<string, unknown>);
+      }, 3000);
+    };
+
+    editor.on('update', debouncedNotify);
+
+    return () => {
+      clearTimeout(debounceTimer);
+      editor.off('update', debouncedNotify);
+    };
+  }, [editor, onContentChange]);
+
+  // Sync plan content when HypothesisBlock changes (for sprint documents)
+  const lastSyncedPlanRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!editor || !onPlanChange) return;
+
+    const syncPlan = () => {
+      const json = editor.getJSON();
+      const plan = extractHypothesisText(json);
+
+      // Only sync if plan has changed (including when it becomes null/empty)
+      if (plan === lastSyncedPlanRef.current) {
+        return;
+      }
+      lastSyncedPlanRef.current = plan;
+
+      // Call the callback with the new plan text (empty string if null)
+      onPlanChange(plan || '');
+    };
+
+    // Debounce during editing (300ms per PRD spec)
+    let debounceTimer: ReturnType<typeof setTimeout>;
+    const debouncedSync = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(syncPlan, 300);
+    };
+
+    editor.on('update', debouncedSync);
+    // Don't sync on initial load - let the parent handle initial state
+
+    return () => {
+      clearTimeout(debounceTimer);
+      editor.off('update', debouncedSync);
+    };
+  }, [editor, onPlanChange]);
+
   // Handle title changes
-  const handleTitleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleTitleChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newTitle = e.target.value;
     hasLocalChangesRef.current = true; // Mark as having local changes to prevent stale overwrites
     setTitle(newTitle);
@@ -507,6 +842,7 @@ export function Editor({
           {/* WCAG 1.4.12: min-w-[3rem] prevents collapse, overflow-visible shows text */}
           <h1 className="flex-1 min-w-[3rem] overflow-visible text-sm font-medium text-foreground m-0">
             {title || 'Untitled'}
+            {titleSuffix && <span className="text-muted font-normal"> &mdash; {titleSuffix}</span>}
           </h1>
 
           {/* Sync status - WCAG 4.1.3 aria-live for status messages */}
@@ -579,26 +915,96 @@ export function Editor({
       {/* Content area with optional sidebar */}
       <div className="flex flex-1 overflow-hidden">
         {/* Editor area - clickable to focus at end */}
-        <div className="flex flex-1 flex-col overflow-auto cursor-text">
+        <div className="flex flex-1 flex-col overflow-auto cursor-text pb-32">
           <div className="mx-auto max-w-3xl w-full py-8 pr-8 pl-12">
+            {/* Breadcrumbs above title */}
+            {breadcrumbs && (
+              <div className="mb-2 pl-8">
+                {breadcrumbs}
+              </div>
+            )}
             {/* Large document title */}
-            <input
+            <textarea
               ref={titleInputRef}
-              type="text"
               value={title}
-              onChange={handleTitleChange}
+              onChange={titleReadOnly ? undefined : handleTitleChange}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
                   editor?.commands.focus('start');
                 }
               }}
+              onInput={(e) => {
+                const el = e.currentTarget;
+                el.style.height = 'auto';
+                el.style.height = `${el.scrollHeight}px`;
+              }}
               placeholder="Untitled"
-              className="mb-6 w-full bg-transparent text-3xl font-bold text-foreground placeholder:text-muted/30 focus:outline-none pl-8"
+              readOnly={titleReadOnly}
+              rows={1}
+              className={cn(
+                "mb-6 w-full bg-transparent text-3xl font-bold text-foreground placeholder:text-muted/30 focus:outline-none pl-8 resize-none overflow-hidden",
+                titleReadOnly && "cursor-default"
+              )}
             />
-            <div className="tiptap-wrapper" data-testid="tiptap-editor">
-              <EditorContent editor={editor} />
+            {contentBanner}
+            <div
+              className="tiptap-wrapper"
+              data-testid="tiptap-editor"
+              onContextMenu={(e) => {
+                if (!editor || editor.state.selection.empty) return;
+                e.preventDefault();
+                const menu = document.createElement('div');
+                menu.className = 'comment-context-menu';
+                menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;z-index:9999;background:rgb(39,39,42);border:1px solid rgb(63,63,70);border-radius:6px;padding:4px 0;box-shadow:0 4px 12px rgba(0,0,0,0.4);`;
+                const btn = document.createElement('button');
+                btn.textContent = 'Add Comment';
+                btn.style.cssText = 'display:block;width:100%;padding:6px 12px;background:none;border:none;color:rgb(228,228,231);font-size:13px;cursor:pointer;text-align:left;';
+                btn.onmouseenter = () => { btn.style.background = 'rgb(63,63,70)'; };
+                btn.onmouseleave = () => { btn.style.background = 'none'; };
+                btn.onclick = () => {
+                  editor.commands.addComment();
+                  menu.remove();
+                };
+                menu.appendChild(btn);
+                document.body.appendChild(menu);
+                const dismiss = (ev: MouseEvent) => {
+                  if (!menu.contains(ev.target as Node)) {
+                    menu.remove();
+                    document.removeEventListener('mousedown', dismiss);
+                  }
+                };
+                setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
+              }}
+            >
+              <ErrorBoundary>
+                <EditorContent editor={editor} />
+              </ErrorBoundary>
             </div>
+            {editor && !editor.isDestroyed && (
+              <BubbleMenu
+                editor={editor}
+                pluginKey="commentBubbleMenu"
+                shouldShow={({ state }) => {
+                  if (state.selection.empty) return false;
+                  const { $from } = state.selection;
+                  if ($from.parent.type.name === 'codeBlock') return false;
+                  return true;
+                }}
+                tippyOptions={{ placement: 'top', duration: 150 }}
+              >
+                <button
+                  onClick={() => editor.commands.addComment()}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 border border-zinc-600 rounded-md text-xs text-zinc-200 hover:bg-zinc-700 transition-colors shadow-lg"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                  Comment
+                </button>
+              </BubbleMenu>
+            )}
+            {/* Pending comment input is now rendered as a ProseMirror widget decoration in CommentDisplay */}
           </div>
           {/* Spacer to fill remaining height - clickable to focus editor at end */}
           <div
@@ -649,9 +1055,11 @@ export function Editor({
               </Tooltip>
             </div>
             {/* Sidebar content */}
-            <div className="flex-1 overflow-auto">
-              {sidebar}
-            </div>
+            <ScrollFade className="flex-1">
+              <div className="pb-20">
+                {sidebar}
+              </div>
+            </ScrollFade>
           </div>
 
           {/* Expand button when right sidebar is collapsed */}

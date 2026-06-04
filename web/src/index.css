@@ -23,9 +23,13 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Focus styles for accessibility */
+/* Focus styles for accessibility.
+ * Uses the accent token's runtime value (#4a90e2) for visibility against the
+ * dark background. Original #005ea2 had insufficient contrast — see
+ * tailwind.config.js for the audit reasoning.
+ */
 :focus-visible {
-  outline: 2px solid #005ea2; /* Logo blue */
+  outline: 2px solid #4a90e2;
   outline-offset: 2px;
 }
 
@@ -130,12 +134,19 @@ input::placeholder {
   margin: 0.5em 0;
   overflow-x: auto;
   position: relative;
+  /* Wide content breakout - allow code blocks to expand beyond container */
+  width: max-content;
+  min-width: 100%;
+  max-width: min(1200px, calc(100vw - 380px)); /* Account for sidebars */
+  margin-left: 50%;
+  transform: translateX(-50%);
 }
 
 .ProseMirror pre code {
   background: none;
   padding: 0;
   color: #e5e7eb;
+  white-space: pre; /* Never wrap code - always expand horizontally */
 }
 
 /* Syntax highlighting for code blocks */
@@ -407,12 +418,24 @@ span[data-emoji] {
 }
 
 /* Table styles */
+.ProseMirror .tableWrapper {
+  overflow-x: auto;
+  /* Wide content breakout - expand to fill space between sidebars */
+  /* Layout: Icon Rail (48px) | Sidebar (224px) | Content (flex-1) | Properties (256px) = 528px */
+  /* Inside content: max-w-3xl (48rem) centered with mx-auto, pl-12 (48px) + pr-8 (32px) */
+  /* Inside that: ProseMirror padding-left: 32px */
+  /* Negative margins pull the table out to fill the scrollable container */
+  --mx-auto-offset: max(0px, (100vw - 528px - 48rem) / 2);
+  margin: 0.5em calc(-32px - var(--mx-auto-offset)) 0.5em calc(-80px - var(--mx-auto-offset));
+}
+
 .ProseMirror table {
   border-collapse: collapse;
-  table-layout: fixed;
-  width: 100%;
-  margin: 0.5em 0;
-  overflow: hidden;
+  table-layout: auto;
+  /* Width determined by column content, not forced edge-to-edge */
+  width: max-content;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .ProseMirror td,
@@ -450,7 +473,13 @@ span[data-emoji] {
   bottom: -2px;
   width: 4px;
   background-color: #5e6ad2;
-  pointer-events: none;
+  cursor: col-resize;
+}
+
+/* Show grab cursor near column borders when table is resizable */
+.ProseMirror.resize-cursor td,
+.ProseMirror.resize-cursor th {
+  cursor: col-resize;
 }
 
 /* Toggle/Details block styles - Notion-like collapsible block */
@@ -749,9 +778,259 @@ span[data-emoji] {
   color: #8a8a8a;
 }
 
+/* Inline comment highlights */
+.ProseMirror .comment-highlight {
+  background-color: rgba(245, 158, 11, 0.2);
+  border-bottom: 2px solid rgba(245, 158, 11, 0.5);
+  padding: 1px 0;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.ProseMirror .comment-highlight:hover {
+  background-color: rgba(245, 158, 11, 0.35);
+}
+
+.ProseMirror .comment-highlight:has(.comment-highlight-resolved) {
+  background-color: transparent !important;
+  border-bottom-color: transparent !important;
+}
+
+/* Inline comment thread cards (GitHub-style) */
+.comment-thread-inline {
+  margin: 4px 0;
+  border: 1px solid rgba(63, 63, 70, 0.8);
+  border-radius: 6px;
+  background: rgba(24, 24, 27, 0.6);
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.comment-quoted-text {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.6);
+  font-size: 12px;
+  color: rgba(161, 161, 170, 0.8);
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.comment-root {
+  padding: 10px 12px 6px;
+}
+
+.comment-reply {
+  padding: 6px 12px;
+  border-top: 1px solid rgba(63, 63, 70, 0.4);
+}
+
+.comment-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.comment-author {
+  font-weight: 600;
+  color: rgba(228, 228, 231, 0.9);
+}
+
+.comment-time {
+  color: rgba(113, 113, 122, 0.8);
+  font-size: 11px;
+}
+
+.comment-resolve-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid rgba(63, 63, 70, 0.6);
+  border-radius: 4px;
+  color: rgba(161, 161, 170, 0.8);
+  cursor: pointer;
+  padding: 1px 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  transition: all 0.15s ease;
+}
+
+.comment-resolve-btn:hover {
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: rgba(34, 197, 94, 0.9);
+}
+
+.comment-body {
+  font-size: 13px;
+  color: rgba(212, 212, 216, 0.9);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.comment-reply-area {
+  padding: 6px 12px 8px;
+  border-top: 1px solid rgba(63, 63, 70, 0.4);
+}
+
+.comment-reply-input {
+  width: 100%;
+  background: rgba(39, 39, 42, 0.6);
+  border: 1px solid rgba(63, 63, 70, 0.6);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: rgba(228, 228, 231, 0.9);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.comment-reply-input:focus {
+  border-color: rgba(99, 102, 241, 0.6);
+}
+
+.comment-reply-input::placeholder {
+  color: rgba(113, 113, 122, 0.6);
+}
+
+/* Resolved comment indicator */
+.comment-thread-resolved {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: rgba(113, 113, 122, 0.7);
+}
+
+.comment-resolved-icon {
+  color: rgba(34, 197, 94, 0.6);
+}
+
+.comment-resolved-text {
+  flex: 1;
+}
+
+.comment-resolved-toggle {
+  color: rgba(99, 102, 241, 0.7);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.comment-resolved-toggle:hover {
+  color: rgba(99, 102, 241, 1);
+  text-decoration: underline;
+}
+
+/* Pending comment input (inline widget decoration) */
+.comment-pending-input {
+  padding: 8px 12px;
+}
+
+.comment-pending-label {
+  font-size: 11px;
+  color: rgba(161, 161, 170, 0.7);
+  margin-bottom: 6px;
+}
+
+.comment-pending-field {
+  width: 100%;
+  background: rgba(39, 39, 42, 0.6);
+  border: 1px solid rgba(63, 63, 70, 0.6);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  color: rgba(228, 228, 231, 0.9);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.comment-pending-field:focus {
+  border-color: rgba(99, 102, 241, 0.6);
+}
+
+.comment-pending-field::placeholder {
+  color: rgba(113, 113, 122, 0.6);
+}
+
+.comment-pending-hint {
+  font-size: 11px;
+  color: rgba(113, 113, 122, 0.5);
+  margin-top: 4px;
+}
+
 /* Nested task lists */
 .ProseMirror ul.task-list ul.task-list {
   margin-left: 1.5em;
   margin-top: 0.25em;
   margin-bottom: 0.25em;
+}
+
+/* AI Scoring inline feedback (similar treatment to inline comments) */
+.ai-scoring-inline {
+  margin: 2px 0 4px;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.ai-scoring-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  border-left: 3px solid;
+}
+
+.ai-scoring-green {
+  background: rgba(34, 197, 94, 0.06);
+  border-left-color: rgba(34, 197, 94, 0.5);
+  color: rgba(34, 197, 94, 0.8);
+}
+
+.ai-scoring-yellow {
+  background: rgba(234, 179, 8, 0.06);
+  border-left-color: rgba(234, 179, 8, 0.5);
+  color: rgba(234, 179, 8, 0.8);
+}
+
+.ai-scoring-red {
+  background: rgba(239, 68, 68, 0.06);
+  border-left-color: rgba(239, 68, 68, 0.5);
+  color: rgba(239, 68, 68, 0.8);
+}
+
+.ai-scoring-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ai-scoring-status-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+}
+
+.ai-scoring-text {
+  flex: 1;
+  color: rgba(161, 161, 170, 0.9);
+}
+
+.ai-scoring-conciseness {
+  flex-basis: 100%;
+  margin-top: 2px;
+  padding-left: 26px;
+  color: rgba(251, 146, 60, 0.8);
+  font-style: italic;
 }

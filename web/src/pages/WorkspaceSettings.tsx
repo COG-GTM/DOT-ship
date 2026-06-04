@@ -190,7 +190,7 @@ export function WorkspaceSettingsPage() {
       </div>
 
       {/* Content */}
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-6 pb-20">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <div className="text-muted">Loading...</div>
@@ -286,7 +286,7 @@ function MembersTab({
             type="checkbox"
             checked={showArchived}
             onChange={(e) => onShowArchivedChange(e.target.checked)}
-            className="h-3.5 w-3.5 rounded border-border text-accent focus:ring-accent/50"
+            className="h-3.5 w-3.5 rounded border-border text-accent-bright focus:ring-accent/50"
           />
           <span className="text-xs text-muted">Show archived</span>
         </label>
@@ -325,6 +325,7 @@ function MembersTab({
                         value={member.role || 'member'}
                         onChange={(e) => onUpdateRole(member.userId, e.target.value as 'admin' | 'member')}
                         disabled={isLastAdmin}
+                        aria-label={`Role for ${member.name || member.email}`}
                         className={cn(
                           'px-2 py-1 rounded text-sm bg-background border border-border',
                           isLastAdmin && 'opacity-50 cursor-not-allowed'
@@ -343,7 +344,7 @@ function MembersTab({
                     {isArchived ? (
                       <button
                         onClick={() => onRestoreMember(member.userId)}
-                        className="text-sm text-accent hover:text-accent/80 transition-colors"
+                        className="text-sm text-accent-bright hover:text-accent-bright/80 transition-colors"
                       >
                         Restore
                       </button>
@@ -484,7 +485,7 @@ function InvitesTab({
                     {invite.x509SubjectDn ? (
                       <span className="font-mono text-xs">{invite.x509SubjectDn}</span>
                     ) : (
-                      <span className="text-muted/50">-</span>
+                      <span className="text-muted">-</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-sm text-muted capitalize">{invite.role}</td>
@@ -498,7 +499,7 @@ function InvitesTab({
                         "text-sm transition-colors",
                         copiedId === invite.id
                           ? "text-green-500"
-                          : "text-accent hover:text-accent/80"
+                          : "text-accent-bright hover:text-accent-bright/80"
                       )}
                     >
                       {copiedId === invite.id ? 'Copied!' : 'Copy Link'}

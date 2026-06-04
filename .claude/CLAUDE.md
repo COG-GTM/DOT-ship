@@ -57,6 +57,17 @@ pnpm test             # Runs api unit tests via vitest
 
 **Empty test footgun:** Tests with only TODO comments pass silently. Use `test.fixme()` for unimplemented tests. Pre-commit hook (`scripts/check-empty-tests.sh`) catches these.
 
+**Seed data requirements:** When writing E2E tests that require specific data:
+1. ALWAYS update `e2e/fixtures/isolated-env.ts` to create required data
+2. NEVER use conditional `test.skip()` for missing data - use assertions with clear messages instead:
+   ```typescript
+   // BAD: skips silently
+   if (rowCount < 4) { test.skip(true, 'Not enough rows'); return; }
+   // GOOD: fails with actionable message
+   expect(rowCount, 'Seed data should provide at least 4 issues. Run: pnpm db:seed').toBeGreaterThanOrEqual(4);
+   ```
+3. If a test needs N rows, ensure fixtures create at least N+2 rows
+
 ## Architecture
 
 **Monorepo Structure** (pnpm workspaces):
@@ -74,11 +85,15 @@ pnpm test             # Runs api unit tests via vitest
 
 **New document titles**: All document types use `"Untitled"` as the default title. No variations like "Untitled Issue" or "Untitled Project". The shared Editor component expects this exact string to show placeholder styling. See `docs/document-model-conventions.md` for details.
 
-**Document associations**: Documents reference other documents via `parent_id`, `project_id`, and `sprint_id`. Issues belong to projects and can be assigned to sprints.
+**Document associations**: Documents reference other documents via the `document_associations` junction table (relationship types: `parent`, `project`, `sprint`, `program`). Legacy columns `program_id` and `project_id` still exist; `sprint_id` was dropped by migration 027.
 
 **Editor content**: All document types use the same TipTap JSON content structure stored in `content` column, with Yjs binary state in `yjs_state` for conflict-free collaboration.
 
-**API routes**: REST endpoints at `/api/{resource}` (documents, issues, projects, sprints). Auth uses session cookies with 15-minute timeout.
+**API routes**: REST endpoints at `/api/{resource}` (documents, issues, projects, weeks). Auth uses session cookies with 15-minute timeout.
+
+## Adding API Endpoints
+
+**All API routes must be registered with OpenAPI.** See `/ship-openapi-endpoints` skill for the full pattern (schema → register path → implement route). Result: Swagger + MCP tools auto-generated.
 
 ## Database
 
@@ -104,7 +119,18 @@ Local dev uses `.env.local` for DB connection.
 
 ## Deployment
 
-**"Deploy" means deploy BOTH API and frontend.** Never deploy just one - they must stay in sync. See `/workflows:deploy` for full sequence and monitoring steps.
+**Just run the scripts.** Use `/workflows:deploy` for the full workflow, or run manually:
+
+```bash
+./scripts/deploy.sh prod           # Backend → Elastic Beanstalk
+./scripts/deploy-frontend.sh prod  # Frontend → S3/CloudFront
+```
+
+**After deploy, verify with browser** (curl can't catch JS errors). Health checks:
+- Prod API: `http://ship-api-prod.eba-xsaqsg9h.us-east-1.elasticbeanstalk.com/health`
+- Prod Web: `https://ship.awsdev.treasury.gov`
+
+**Shadow (UAT):** Deploy to shadow from `feat/unified-document-model-v2` before merging to master.
 
 ## Philosophy Enforcement
 
@@ -118,27 +144,4 @@ Use `/ship-philosophy-reviewer` to audit changes against Ship's core philosophy.
 
 ## Security Compliance
 
-**NEVER use `git commit --no-verify`.** This bypasses security checks and is not acceptable.
-
-### Pre-commit Hooks
-
-This repo uses `comply opensource` as a pre-commit hook to scan for:
-- Embedded secrets (gitleaks)
-- Sensitive information (AI analysis)
-- Vulnerability scanning (trivy)
-
-### When Compliance Checks Fail
-
-If the pre-commit hook fails:
-
-1. **Fix the issue** - Remove secrets, update ATTESTATION.md, etc.
-2. **If the tool itself is broken** - Report the bug, but do NOT bypass with `--no-verify`
-3. **Emergency bypass procedure** - There is none. Fix the issue or wait for tool fix.
-
-### CI Enforcement
-
-GitHub Actions runs the same compliance checks on every PR. Even if someone bypasses local hooks:
-- `secrets-scan` job runs gitleaks on full commit history
-- `attestation-check` verifies ATTESTATION.md exists and is recent
-
-These are **required status checks** - PRs cannot merge without passing.
+**NEVER use `git commit --no-verify`.** See `/ship-security-compliance` skill for pre-commit hooks (`comply opensource`), CI enforcement, and compliance check failure handling.

@@ -35,10 +35,16 @@ import os from 'os';
  * - etc.
  */
 async function getWorkerPort(workerIndex: number): Promise<number> {
-  const BASE_PORT = 50000;
+  const BASE_PORT = 10000;
+  const MAX_PORT = 65535;
   const PORTS_PER_WORKER = 100;
-  const startPort = BASE_PORT + workerIndex * PORTS_PER_WORKER;
-  const endPort = startPort + PORTS_PER_WORKER - 1;
+  const AVAILABLE_RANGE = MAX_PORT - BASE_PORT; // 55535 ports available
+  const MAX_WORKERS = Math.floor(AVAILABLE_RANGE / PORTS_PER_WORKER); // 555 workers max
+
+  // Wrap worker index to stay within valid port range
+  const wrappedIndex = workerIndex % MAX_WORKERS;
+  const startPort = BASE_PORT + wrappedIndex * PORTS_PER_WORKER;
+  const endPort = Math.min(startPort + PORTS_PER_WORKER - 1, MAX_PORT);
 
   return getPort({ port: portNumbers(startPort, endPort) });
 }
@@ -87,36 +93,63 @@ export const test = base.extend<
   { apiServer: { url: string; process: ChildProcess } },
   WorkerFixtures
 >({
+  // Override context to disable action items modal for ALL pages (including multi-page tests)
+  context: async ({ context }, use) => {
+    // Set localStorage flag to disable action items modal before any navigation
+    // This applies to all pages created from this context
+    await context.addInitScript(() => {
+      localStorage.setItem('ship:disableActionItemsModal', 'true');
+    });
+    await use(context);
+  },
+
   // PostgreSQL container - one per worker, starts fresh for each test run
+  // CRITICAL: Use try-finally to ensure container cleanup even on errors
   dbContainer: [
     async ({}, use, workerInfo) => {
       const workerTag = `[Worker ${workerInfo.workerIndex}]`;
       const debug = process.env.DEBUG === '1';
       if (debug) console.log(`${workerTag} Starting PostgreSQL container...`);
 
-      const container = await new PostgreSqlContainer('postgres:15')
-        .withDatabase('ship_test')
-        .withUsername('test')
-        .withPassword('test')
-        .start();
+      // Retry container startup to handle intermittent Docker port binding failures
+      // Under parallel load, Docker's port allocation can get congested
+      let container!: StartedPostgreSqlContainer;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          container = await new PostgreSqlContainer('postgres:15')
+            .withDatabase('ship_test')
+            .withUsername('test')
+            .withPassword('test')
+            .withStartupTimeout(120000)
+            .start();
+          break;
+        } catch (err) {
+          if (debug) console.log(`${workerTag} Container start attempt ${attempt} failed: ${(err as Error).message}`);
+          if (attempt === 3) throw err;
+          await new Promise(r => setTimeout(r, 2000 * attempt));
+        }
+      }
 
-      const dbUrl = container.getConnectionUri();
-      if (debug) console.log(`${workerTag} PostgreSQL ready on port ${container.getMappedPort(5432)}`);
+      try {
+        const dbUrl = container.getConnectionUri();
+        if (debug) console.log(`${workerTag} PostgreSQL ready on port ${container.getMappedPort(5432)}`);
 
-      // Run schema and migrations
-      if (debug) console.log(`${workerTag} Running migrations...`);
-      await runMigrations(dbUrl);
-      if (debug) console.log(`${workerTag} Migrations complete`);
+        // Run schema and migrations
+        if (debug) console.log(`${workerTag} Running migrations...`);
+        await runMigrations(dbUrl);
+        if (debug) console.log(`${workerTag} Migrations complete`);
 
-      await use(container);
-
-      if (debug) console.log(`${workerTag} Stopping PostgreSQL container...`);
-      await container.stop();
+        await use(container);
+      } finally {
+        if (debug) console.log(`${workerTag} Stopping PostgreSQL container...`);
+        await container.stop();
+      }
     },
     { scope: 'worker' },
   ],
 
   // API server - one per worker
+  // CRITICAL: Use try-finally to ensure process cleanup even on errors
   apiServer: [
     async ({ dbContainer }, use, workerInfo) => {
       const workerTag = `[Worker ${workerInfo.workerIndex}]`;
@@ -142,25 +175,27 @@ export const test = base.extend<
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      // Log server output for debugging
-      proc.stdout?.on('data', (data) => {
-        if (process.env.DEBUG) {
-          console.log(`${workerTag} API: ${data.toString().trim()}`);
-        }
-      });
-      proc.stderr?.on('data', (data) => {
-        console.error(`${workerTag} API ERROR: ${data.toString().trim()}`);
-      });
+      try {
+        // Log server output for debugging
+        proc.stdout?.on('data', (data) => {
+          if (process.env.DEBUG) {
+            console.log(`${workerTag} API: ${data.toString().trim()}`);
+          }
+        });
+        proc.stderr?.on('data', (data) => {
+          console.error(`${workerTag} API ERROR: ${data.toString().trim()}`);
+        });
 
-      // Wait for server to be ready
-      const apiUrl = `http://localhost:${port}`;
-      await waitForServer(`${apiUrl}/health`, 30000);
-      if (debug) console.log(`${workerTag} API server ready at ${apiUrl}`);
+        // Wait for server to be ready
+        const apiUrl = `http://localhost:${port}`;
+        await waitForServer(`${apiUrl}/health`, 30000);
+        if (debug) console.log(`${workerTag} API server ready at ${apiUrl}`);
 
-      await use({ url: apiUrl, process: proc });
-
-      if (debug) console.log(`${workerTag} Stopping API server...`);
-      proc.kill('SIGTERM');
+        await use({ url: apiUrl, process: proc });
+      } finally {
+        if (debug) console.log(`${workerTag} Stopping API server...`);
+        proc.kill('SIGTERM');
+      }
     },
     { scope: 'worker' },
   ],
@@ -169,6 +204,7 @@ export const test = base.extend<
   // CRITICAL: We use vite preview instead of vite dev to avoid memory explosion
   // vite dev = 300-500MB per instance (HMR, file watchers, dependency graph)
   // vite preview = 30-50MB per instance (simple static file server)
+  // CRITICAL: Use try-finally to ensure process cleanup even on errors
   webServer: [
     async ({ apiServer }, use, workerInfo) => {
       const workerTag = `[Worker ${workerInfo.workerIndex}]`;
@@ -201,27 +237,29 @@ export const test = base.extend<
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
-      // Log output for debugging
-      proc.stdout?.on('data', (data) => {
-        if (process.env.DEBUG) {
-          console.log(`${workerTag} Preview: ${data.toString().trim()}`);
-        }
-      });
-      proc.stderr?.on('data', (data) => {
-        // Vite uses stderr for some normal output
-        if (process.env.DEBUG) {
-          console.log(`${workerTag} Preview: ${data.toString().trim()}`);
-        }
-      });
+      try {
+        // Log output for debugging
+        proc.stdout?.on('data', (data) => {
+          if (process.env.DEBUG) {
+            console.log(`${workerTag} Preview: ${data.toString().trim()}`);
+          }
+        });
+        proc.stderr?.on('data', (data) => {
+          // Vite uses stderr for some normal output
+          if (process.env.DEBUG) {
+            console.log(`${workerTag} Preview: ${data.toString().trim()}`);
+          }
+        });
 
-      const webUrl = `http://localhost:${port}`;
-      await waitForServer(webUrl, 30000); // Preview starts much faster than dev
-      if (debug) console.log(`${workerTag} Vite preview server ready at ${webUrl}`);
+        const webUrl = `http://localhost:${port}`;
+        await waitForServer(webUrl, 30000); // Preview starts much faster than dev
+        if (debug) console.log(`${workerTag} Vite preview server ready at ${webUrl}`);
 
-      await use({ url: webUrl, process: proc });
-
-      if (debug) console.log(`${workerTag} Stopping Vite preview server...`);
-      proc.kill('SIGTERM');
+        await use({ url: webUrl, process: proc });
+      } finally {
+        if (debug) console.log(`${workerTag} Stopping Vite preview server...`);
+        proc.kill('SIGTERM');
+      }
     },
     { scope: 'worker' },
   ],
@@ -252,11 +290,9 @@ async function runMigrations(dbUrl: string): Promise<void> {
       )
     `);
 
-    // Step 3: Get list of already-applied migrations
-    const appliedResult = await pool.query('SELECT version FROM schema_migrations ORDER BY version');
-    const appliedMigrations = new Set(appliedResult.rows.map((r) => r.version));
-
-    // Step 4: Find and run pending migrations
+    // Step 3: Mark all migrations as applied since schema.sql represents the full current state.
+    // schema.sql includes all table definitions from all migrations, so running migrations
+    // again would fail on CREATE TABLE statements that don't use IF NOT EXISTS.
     const migrationsDir = path.join(PROJECT_ROOT, 'api/src/db/migrations');
     let migrationFiles: string[] = [];
 
@@ -270,26 +306,10 @@ async function runMigrations(dbUrl: string): Promise<void> {
 
     for (const file of migrationFiles) {
       const version = file.replace('.sql', '');
-
-      if (appliedMigrations.has(version)) {
-        continue;
-      }
-
-      const migrationPath = path.join(migrationsDir, file);
-      const migrationSql = readFileSync(migrationPath, 'utf-8');
-
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query(migrationSql);
-        await client.query('INSERT INTO schema_migrations (version) VALUES ($1)', [version]);
-        await client.query('COMMIT');
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
+      await pool.query(
+        'INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING',
+        [version]
+      );
     }
 
     // Step 5: Seed minimal test data
@@ -313,13 +333,15 @@ async function seedMinimalTestData(pool: Pool): Promise<void> {
   const passwordHash = await bcrypt.hash('admin123', 10);
 
   // Create workspace with sprint_start_date 3 months ago (matches full seed)
-  const threeMonthsAgo = new Date();
-  threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+  // IMPORTANT: Use UTC throughout to match the API's date math (team.ts parses as UTC)
+  const nowUtc = new Date();
+  const threeMonthsAgoUtc = new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() - 3, nowUtc.getUTCDate()));
+  const sprintStartDateStr = threeMonthsAgoUtc.toISOString().split('T')[0];
   const workspaceResult = await pool.query(
     `INSERT INTO workspaces (name, sprint_start_date)
      VALUES ('Test Workspace', $1)
      RETURNING id`,
-    [threeMonthsAgo.toISOString().split('T')[0]]
+    [sprintStartDateStr]
   );
   const workspaceId = workspaceResult.rows[0].id;
 
@@ -340,11 +362,13 @@ async function seedMinimalTestData(pool: Pool): Promise<void> {
   );
 
   // Create person document for user
-  await pool.query(
+  const personResult = await pool.query(
     `INSERT INTO documents (workspace_id, document_type, title, properties, created_by)
-     VALUES ($1, 'person', 'Dev User', $2, $3)`,
+     VALUES ($1, 'person', 'Dev User', $2, $3)
+     RETURNING id`,
     [workspaceId, JSON.stringify({ user_id: userId, email: 'dev@ship.local' }), userId]
   );
+  const personId = personResult.rows[0].id;
 
   // Create a member user (non-admin) for authorization tests
   const memberResult = await pool.query(
@@ -390,49 +414,83 @@ async function seedMinimalTestData(pool: Pool): Promise<void> {
     programIds[prog.key] = result.rows[0].id;
   }
 
-  // Calculate current sprint number (1-week sprints)
-  const today = new Date();
-  const daysSinceStart = Math.floor((today.getTime() - threeMonthsAgo.getTime()) / (1000 * 60 * 60 * 24));
+  // Calculate current sprint number (1-week sprints) using UTC to match API (team.ts:1639-1647)
+  const todayUtc = new Date(Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate()));
+  const daysSinceStart = Math.floor((todayUtc.getTime() - threeMonthsAgoUtc.getTime()) / (1000 * 60 * 60 * 24));
   const currentSprintNumber = Math.max(1, Math.floor(daysSinceStart / 7) + 1);
 
   // Create sprints for each program (current-2 to current+2)
+  // IMPORTANT: Must create document_associations for sprints to programs
+  // The API queries via junction table, not legacy program_id column
+  // IMPORTANT: Must include start_date for allocation queries to work
   const sprintIds: Record<string, Record<number, string>> = {};
   for (const prog of programs) {
     sprintIds[prog.key] = {};
     for (let sprintNum = currentSprintNumber - 2; sprintNum <= currentSprintNumber + 2; sprintNum++) {
       if (sprintNum > 0) {
+        // Calculate sprint start date (1-week sprints starting from threeMonthsAgoUtc)
+        const sprintStartDate = new Date(threeMonthsAgoUtc.getTime() + (sprintNum - 1) * 7 * 24 * 60 * 60 * 1000);
+        const startDateStr = sprintStartDate.toISOString().split('T')[0];
+
         const result = await pool.query(
-          `INSERT INTO documents (workspace_id, document_type, title, program_id, properties, created_by)
-           VALUES ($1, 'sprint', $2, $3, $4, $5)
+          `INSERT INTO documents (workspace_id, document_type, title, properties, created_by)
+           VALUES ($1, 'sprint', $2, $3, $4)
            RETURNING id`,
           [
             workspaceId,
-            `Sprint ${sprintNum}`,
-            programIds[prog.key],
-            JSON.stringify({ sprint_number: sprintNum, owner_id: userId }),
+            `Week ${sprintNum}`,
+            JSON.stringify({ sprint_number: sprintNum, owner_id: userId, start_date: startDateStr }),
             userId,
           ]
         );
-        sprintIds[prog.key][sprintNum] = result.rows[0].id;
+        const sprintId = result.rows[0].id;
+        sprintIds[prog.key][sprintNum] = sprintId;
+
+        // Create association to program via junction table (required for API queries)
+        await pool.query(
+          `INSERT INTO document_associations (document_id, related_id, relationship_type)
+           VALUES ($1, $2, 'program')`,
+          [sprintId, programIds[prog.key]]
+        );
       }
     }
   }
 
   // Create issues for Ship Core with various states and estimates
+  // IMPORTANT: Bulk selection tests need 6+ rows in each state filter
+  // Tests will skip with "Not enough rows" if insufficient data exists
   const shipCoreIssues = [
     // Done issues (past sprint)
     { title: 'Initial project setup', state: 'done', priority: 'high', sprintOffset: -1, estimate: 4 },
     { title: 'Database schema design', state: 'done', priority: 'high', sprintOffset: -1, estimate: 8 },
+    { title: 'User authentication setup', state: 'done', priority: 'high', sprintOffset: -1, estimate: 6 },
+    { title: 'CI/CD pipeline configuration', state: 'done', priority: 'medium', sprintOffset: -1, estimate: 4 },
     // Current sprint - mixed states with estimates for capacity tracking
     { title: 'Implement sprint management', state: 'done', priority: 'high', sprintOffset: 0, estimate: 5 },
     { title: 'Build issue assignment flow', state: 'in_progress', priority: 'high', sprintOffset: 0, estimate: 8 },
     { title: 'Add sprint velocity metrics', state: 'todo', priority: 'medium', sprintOffset: 0, estimate: 4 },
     { title: 'Implement burndown chart', state: 'todo', priority: 'medium', sprintOffset: 0, estimate: 6 },
+    { title: 'Review dashboard design', state: 'in_review', priority: 'medium', sprintOffset: 0, estimate: 3 },
+    { title: 'Update API documentation', state: 'in_review', priority: 'low', sprintOffset: 0, estimate: 2 },
+    // Additional todo items
+    { title: 'Refactor notification system', state: 'todo', priority: 'medium', sprintOffset: 0, estimate: 5 },
+    { title: 'Add email notifications', state: 'todo', priority: 'low', sprintOffset: 0, estimate: 8 },
+    // Additional in_progress items
+    { title: 'Build settings page', state: 'in_progress', priority: 'medium', sprintOffset: 0, estimate: 6 },
+    { title: 'Implement search feature', state: 'in_progress', priority: 'high', sprintOffset: 0, estimate: 10 },
     // Future sprint
     { title: 'Add team workload view', state: 'todo', priority: 'high', sprintOffset: 1, estimate: 12 },
+    { title: 'Build analytics dashboard', state: 'todo', priority: 'medium', sprintOffset: 1, estimate: 16 },
     // Backlog (no sprint) - with estimates so they can be moved to sprints
+    // Bulk selection tests filter by state=backlog and need 6+ items
     { title: 'Add dark mode support', state: 'backlog', priority: 'low', sprintOffset: null, estimate: 16 },
     { title: 'Create mobile app', state: 'backlog', priority: 'low', sprintOffset: null, estimate: 40 },
+    { title: 'Implement webhooks', state: 'backlog', priority: 'medium', sprintOffset: null, estimate: 12 },
+    { title: 'Add keyboard shortcuts', state: 'backlog', priority: 'low', sprintOffset: null, estimate: 8 },
+    { title: 'Build export to PDF', state: 'backlog', priority: 'low', sprintOffset: null, estimate: 10 },
+    { title: 'Create Slack integration', state: 'backlog', priority: 'medium', sprintOffset: null, estimate: 20 },
+    { title: 'Add calendar view', state: 'backlog', priority: 'low', sprintOffset: null, estimate: 24 },
+    { title: 'Implement file versioning', state: 'backlog', priority: 'low', sprintOffset: null, estimate: 16 },
   ];
 
   let ticketNumber = 0;
@@ -442,14 +500,13 @@ async function seedMinimalTestData(pool: Pool): Promise<void> {
       ? sprintIds['SHIP'][currentSprintNumber + issue.sprintOffset] || null
       : null;
 
-    await pool.query(
-      `INSERT INTO documents (workspace_id, document_type, title, program_id, sprint_id, properties, ticket_number, created_by)
-       VALUES ($1, 'issue', $2, $3, $4, $5, $6, $7)`,
+    const issueResult = await pool.query(
+      `INSERT INTO documents (workspace_id, document_type, title, properties, ticket_number, created_by)
+       VALUES ($1, 'issue', $2, $3, $4, $5)
+       RETURNING id`,
       [
         workspaceId,
         issue.title,
-        programIds['SHIP'],
-        sprintId,
         JSON.stringify({
           state: issue.state,
           priority: issue.priority,
@@ -461,24 +518,78 @@ async function seedMinimalTestData(pool: Pool): Promise<void> {
         userId,
       ]
     );
+
+    const issueId = issueResult.rows[0].id;
+
+    // Create program association via document_associations (replaces legacy program_id column)
+    await pool.query(
+      `INSERT INTO document_associations (document_id, related_id, relationship_type)
+       VALUES ($1, $2, 'program')`,
+      [issueId, programIds['SHIP']]
+    );
+
+    // Create sprint association via document_associations
+    if (sprintId) {
+      await pool.query(
+        `INSERT INTO document_associations (document_id, related_id, relationship_type)
+         VALUES ($1, $2, 'sprint')`,
+        [issueId, sprintId]
+      );
+    }
   }
 
-  // Create a few issues for other programs too (with estimates for capacity testing)
+  // Create issues for other programs (with estimates for capacity testing)
+  // Each program gets multiple issues so program-specific views have enough data
+  const otherProgramIssues = [
+    { state: 'in_progress', priority: 'medium', estimate: 8, titleSuffix: 'initial setup' },
+    { state: 'todo', priority: 'high', estimate: 6, titleSuffix: 'documentation' },
+    { state: 'backlog', priority: 'low', estimate: 10, titleSuffix: 'improvements' },
+    { state: 'done', priority: 'medium', estimate: 4, titleSuffix: 'configuration' },
+  ];
+
   for (const prog of programs.filter(p => p.key !== 'SHIP')) {
-    ticketNumber++;
-    await pool.query(
-      `INSERT INTO documents (workspace_id, document_type, title, program_id, sprint_id, properties, ticket_number, created_by)
-       VALUES ($1, 'issue', $2, $3, $4, $5, $6, $7)`,
-      [
-        workspaceId,
-        `${prog.name} initial setup`,
-        programIds[prog.key],
-        sprintIds[prog.key][currentSprintNumber] || null,
-        JSON.stringify({ state: 'in_progress', priority: 'medium', source: 'internal', assignee_id: userId, estimate: 8 }),
-        ticketNumber,
-        userId,
-      ]
-    );
+    for (const issueTemplate of otherProgramIssues) {
+      ticketNumber++;
+      const progSprintId = issueTemplate.state !== 'backlog'
+        ? sprintIds[prog.key][currentSprintNumber] || null
+        : null;
+      const progIssueResult = await pool.query(
+        `INSERT INTO documents (workspace_id, document_type, title, properties, ticket_number, created_by)
+         VALUES ($1, 'issue', $2, $3, $4, $5)
+         RETURNING id`,
+        [
+          workspaceId,
+          `${prog.name} ${issueTemplate.titleSuffix}`,
+          JSON.stringify({
+            state: issueTemplate.state,
+            priority: issueTemplate.priority,
+            source: 'internal',
+            assignee_id: userId,
+            estimate: issueTemplate.estimate,
+          }),
+          ticketNumber,
+          userId,
+        ]
+      );
+
+      const progIssueId = progIssueResult.rows[0].id;
+
+      // Create program association via document_associations
+      await pool.query(
+        `INSERT INTO document_associations (document_id, related_id, relationship_type)
+         VALUES ($1, $2, 'program')`,
+        [progIssueId, programIds[prog.key]]
+      );
+
+      // Create sprint association via document_associations
+      if (progSprintId) {
+        await pool.query(
+          `INSERT INTO document_associations (document_id, related_id, relationship_type)
+           VALUES ($1, $2, 'sprint')`,
+          [progIssueId, progSprintId]
+        );
+      }
+    }
   }
 
   // Create external issues for feedback consolidation testing
@@ -502,12 +613,129 @@ async function seedMinimalTestData(pool: Pool): Promise<void> {
     if (issue.rejection_reason) {
       properties.rejection_reason = issue.rejection_reason;
     }
+    const extIssueResult = await pool.query(
+      `INSERT INTO documents (workspace_id, document_type, title, properties, ticket_number, created_by)
+       VALUES ($1, 'issue', $2, $3, $4, $5)
+       RETURNING id`,
+      [workspaceId, issue.title, JSON.stringify(properties), ticketNumber, userId]
+    );
+
+    // Create program association via document_associations
     await pool.query(
-      `INSERT INTO documents (workspace_id, document_type, title, program_id, properties, ticket_number, created_by)
-       VALUES ($1, 'issue', $2, $3, $4, $5, $6)`,
-      [workspaceId, issue.title, programIds['SHIP'], JSON.stringify(properties), ticketNumber, userId]
+      `INSERT INTO document_associations (document_id, related_id, relationship_type)
+       VALUES ($1, $2, 'program')`,
+      [extIssueResult.rows[0].id, programIds['SHIP']]
     );
   }
+
+  // Create project documents for team-mode tests
+  // Team allocation grid needs projects to assign team members to
+  const projects = [
+    { name: 'Ship Core Redesign', color: '#3B82F6', programKey: 'SHIP' },
+    { name: 'Auth System v2', color: '#8B5CF6', programKey: 'AUTH' },
+    { name: 'API Gateway', color: '#10B981', programKey: 'API' },
+    { name: 'Component Library', color: '#F59E0B', programKey: 'UI' },
+  ];
+
+  const projectIds: Record<string, string> = {};
+  for (const project of projects) {
+    const projectResult = await pool.query(
+      `INSERT INTO documents (workspace_id, document_type, title, properties, created_by)
+       VALUES ($1, 'project', $2, $3, $4)
+       RETURNING id`,
+      [
+        workspaceId,
+        project.name,
+        JSON.stringify({ color: project.color }),
+        userId,
+      ]
+    );
+    projectIds[project.programKey] = projectResult.rows[0].id;
+
+    // Create association to program via junction table
+    await pool.query(
+      `INSERT INTO document_associations (document_id, related_id, relationship_type)
+       VALUES ($1, $2, 'program')`,
+      [projectResult.rows[0].id, programIds[project.programKey]]
+    );
+  }
+
+  // Create issues with project associations for Status Overview heatmap tests
+  // These issues create "allocations" (person assigned to project in sprint)
+  const allocationIssues = [
+    { title: 'Status Overview test issue 1', programKey: 'SHIP', sprintOffset: 0 },
+    { title: 'Status Overview test issue 2', programKey: 'SHIP', sprintOffset: 0 },
+    { title: 'API work for current week', programKey: 'API', sprintOffset: 0 },
+  ];
+
+  for (const issue of allocationIssues) {
+    ticketNumber++;
+    const sprintId = sprintIds[issue.programKey][currentSprintNumber];
+    const projId = projectIds[issue.programKey];
+
+    if (!sprintId || !projId) continue;
+
+    const issueResult = await pool.query(
+      `INSERT INTO documents (workspace_id, document_type, title, properties, ticket_number, created_by)
+       VALUES ($1, 'issue', $2, $3, $4, $5)
+       RETURNING id`,
+      [
+        workspaceId,
+        issue.title,
+        JSON.stringify({
+          state: 'todo',
+          priority: 'medium',
+          source: 'internal',
+          assignee_id: personId, // Person document ID, not user ID
+        }),
+        ticketNumber,
+        userId,
+      ]
+    );
+    const issueId = issueResult.rows[0].id;
+
+    // Create associations for sprint, project, and program
+    await pool.query(
+      `INSERT INTO document_associations (document_id, related_id, relationship_type) VALUES ($1, $2, 'sprint')`,
+      [issueId, sprintId]
+    );
+    await pool.query(
+      `INSERT INTO document_associations (document_id, related_id, relationship_type) VALUES ($1, $2, 'project')`,
+      [issueId, projId]
+    );
+    await pool.query(
+      `INSERT INTO document_associations (document_id, related_id, relationship_type) VALUES ($1, $2, 'program')`,
+      [issueId, programIds[issue.programKey]]
+    );
+  }
+
+  // Create sprint allocation documents (person assigned to project for a week)
+  // The team/reviews endpoint queries sprints with assignee_ids
+  const allocationSprintResult = await pool.query(
+    `INSERT INTO documents (workspace_id, document_type, title, properties, created_by)
+     VALUES ($1, 'sprint', $2, $3, $4)
+     RETURNING id`,
+    [
+      workspaceId,
+      `Week ${currentSprintNumber} - Ship Core`,
+      JSON.stringify({
+        sprint_number: currentSprintNumber,
+        owner_id: userId,
+        project_id: projectIds['SHIP'],
+        assignee_ids: [personId],
+        start_date: new Date(threeMonthsAgoUtc.getTime() + (currentSprintNumber - 1) * 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      }),
+      userId,
+    ]
+  );
+  const allocationSprintId = allocationSprintResult.rows[0].id;
+
+  // Associate allocation sprint with program
+  await pool.query(
+    `INSERT INTO document_associations (document_id, related_id, relationship_type)
+     VALUES ($1, $2, 'program')`,
+    [allocationSprintId, programIds['SHIP']]
+  );
 
   // Create wiki documents with nested structure for tree testing
   // Include content for content-caching tests to work

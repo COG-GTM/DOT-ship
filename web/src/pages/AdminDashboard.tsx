@@ -147,7 +147,7 @@ export function AdminDashboardPage() {
       </div>
 
       {/* Content */}
-      <main className="flex-1 overflow-auto p-6">
+      <main className="flex-1 overflow-auto p-6 pb-20">
         {loading ? (
           <div className="flex items-center justify-center h-32">
             <div className="text-muted">Loading...</div>
@@ -303,7 +303,7 @@ function WorkspacesTab({
                 <td className="px-4 py-3 text-sm font-medium">
                   <Link
                     to={`/admin/workspaces/${ws.id}`}
-                    className="text-accent hover:underline"
+                    className="text-accent-bright hover:underline"
                   >
                     {ws.name}
                   </Link>
@@ -388,7 +388,7 @@ function UsersTab({
                 {u.id !== currentUserId && (
                   <button
                     onClick={() => onImpersonate(u.id)}
-                    className="text-sm text-accent hover:text-accent/80 transition-colors"
+                    className="text-sm text-accent-bright hover:text-accent-bright/80 transition-colors"
                   >
                     Impersonate
                   </button>

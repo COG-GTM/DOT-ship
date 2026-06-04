@@ -19,9 +19,16 @@
 
 ---
 
+> **This is a fork — audited and improved as the ShipShape project.**
+> Reviewers entry point: **[shipshape/SUBMISSION.md](shipshape/SUBMISSION.md)**.
+> Audit gate (Tue deadline): [shipshape/audit/AUDIT_REPORT.md](shipshape/audit/AUDIT_REPORT.md) + [GATE_CHECKLIST.md](shipshape/audit/GATE_CHECKLIST.md).
+> Improvements live on seven labeled branches: `shipshape/01-type-safety` … `shipshape/07-accessibility`. Each branches off `shipshape/audit` so `git diff shipshape/audit shipshape/0N-...` shows exactly the change set for one category.
+
+---
+
 ## What is Ship?
 
-Ship is a project management tool that combines documentation, issue tracking, and sprint planning in one place. Instead of switching between a wiki, a task tracker, and a spreadsheet, everything lives together.
+Ship is a project management tool that combines documentation, issue tracking, and plan-driven weekly workflows in one place. Instead of switching between a wiki, a task tracker, and a spreadsheet, everything lives together.
 
 **Built by the U.S. Department of the Treasury** for government teams, but useful for any organization that wants to work more effectively.
 
@@ -36,14 +43,14 @@ Ship has four main views, each designed for different questions:
 | **Docs** | "Where's that document?" — Wiki-style pages for team knowledge |
 | **Issues** | "What needs to be done?" — Track tasks, bugs, and features |
 | **Projects** | "What are we building?" — Group issues into deliverables |
-| **Teams** | "Who's doing what?" — See workload across people and sprints |
+| **Teams** | "Who's doing what?" — See workload across people and weeks |
 
 ### The Basics
 
 1. **Create documents** for anything your team needs to remember — meeting notes, specs, onboarding guides
 2. **Create issues** for work that needs to get done — assign them to people and track progress
 3. **Group issues into projects** to organize related work
-4. **Plan sprints** to decide what to work on in the next two weeks
+4. **Write weekly plans** to declare what you intend to accomplish each week
 
 Everyone on the team can edit documents at the same time. You'll see other people's cursors as they type.
 
@@ -57,21 +64,21 @@ In Ship, there's no difference between a "wiki page" and an "issue" at the data 
 
 - You can link any document to any other document
 - Issues can have rich content, not just a title and description
-- Projects and sprints are documents too — they can contain notes, decisions, and context
+- Projects and weeks are documents too — they can contain notes, decisions, and context
 
-### Sprints Follow the Scientific Method
+### Plans Are the Unit of Intent
 
-Ship treats each sprint as an experiment:
+Ship is plan-driven: each week starts with a written plan declaring what you intend to accomplish and ends with a retro capturing what you learned. Issues are a trailing indicator of what was done, not a leading indicator of what to do.
 
-1. **Hypothesis (Sprint Plan)** — Before the sprint, write down what you plan to do and what you expect to happen
-2. **Experiment (The Sprint)** — Do the work
-3. **Conclusion (Sprint Retro)** — After the sprint, write down what actually happened and what you learned
+1. **Plan (Weekly Plan)** — Before the week, write down what you intend to accomplish and why
+2. **Execute (The Week)** — Do the work; issues track what was actually done
+3. **Reflect (Weekly Retro)** — After the week, write down what actually happened and what you learned
 
 This isn't paperwork for paperwork's sake. Teams that skip retrospectives repeat the same mistakes. Teams that write things down learn and improve.
 
 ### Learning, Not Compliance
 
-Documentation requirements in Ship are visible but not blocking. You can start a new sprint without finishing the last retro. But the system makes missing documentation obvious — it shows up as a visual indicator that escalates from yellow to red over time.
+Documentation requirements in Ship are visible but not blocking. You can start a new week without finishing the last retro. But the system makes missing documentation obvious — it shows up as a visual indicator that escalates from yellow to red over time.
 
 The goal isn't to check boxes. It's to capture what your team learned so you can get better.
 
@@ -85,7 +92,28 @@ The goal isn't to check boxes. It's to capture what your team learned so you can
 - [pnpm](https://pnpm.io/) (`npm install -g pnpm`)
 - [Docker](https://www.docker.com/) (for the database)
 
-### Setup
+### Setup (ShipShape fork)
+
+To check out and run **this fork** (the audited / improved version):
+
+```bash
+# 1. Clone this fork (not the upstream repo)
+git clone https://github.com/tylerxia8/ship.git
+cd ship
+
+# 2. Pick a branch to inspect
+git checkout shipshape/audit                  # the audit branch — diagnostic only
+# or
+git checkout shipshape/03-api-perf            # the API-perf improvement branch (etc.)
+
+# 3. Continue with the standard setup below (install, env, db, run)
+```
+
+`shipshape/audit` is the merge base for the seven improvement branches; diff any improvement branch against it to see only that category's change (e.g. `git diff shipshape/audit shipshape/03-api-perf`).
+
+To reproduce baseline measurements, set `SHIPSHAPE_AUDIT=1` when starting the API — this bypasses the dev rate limiter so autocannon/load-test runs reflect handler latency rather than 429s. See [shipshape/audit/AUDIT_REPORT.md § "How to reproduce"](shipshape/audit/AUDIT_REPORT.md#status) for full commands per category.
+
+### Setup (upstream Ship)
 
 ```bash
 # 1. Clone the repository
@@ -97,6 +125,7 @@ pnpm install
 
 # 3. Configure environment
 cp api/.env.example api/.env.local
+cp web/.env.example web/.env
 
 # 4. Start the database
 docker-compose up -d
@@ -127,6 +156,8 @@ Log in with the demo account:
 |---------|-----|-------------|
 | Web app | http://localhost:5173 | The Ship interface |
 | API server | http://localhost:3000 | Backend services |
+| Swagger UI | http://localhost:3000/api/docs | Interactive API documentation |
+| OpenAPI spec | http://localhost:3000/api/openapi.json | OpenAPI 3.0 specification |
 | PostgreSQL | localhost:5432 | Database (via Docker) |
 
 ### Common Commands
@@ -277,7 +308,9 @@ We welcome contributions. See [CONTRIBUTING.md](./CONTRIBUTING.md) for guideline
 - [Application Architecture](./docs/application-architecture.md) — Tech stack and design decisions
 - [Unified Document Model](./docs/unified-document-model.md) — Data model and sync architecture
 - [Document Model Conventions](./docs/document-model-conventions.md) — Terminology and patterns
-- [Sprint Documentation Philosophy](./docs/sprint-documentation-philosophy.md) — Why sprints work the way they do
+- [Week Documentation Philosophy](./docs/week-documentation-philosophy.md) — Why weekly plans and retros work the way they do
+- [Accountability Philosophy](./docs/accountability-philosophy.md) — How Ship enforces accountability
+- [Accountability Manager Guide](./docs/accountability-manager-guide.md) — Using approval workflows
 - [Contributing Guidelines](./CONTRIBUTING.md) — How to contribute
 - [Security Policy](./SECURITY.md) — Vulnerability reporting
 

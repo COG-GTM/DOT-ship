@@ -13,10 +13,13 @@ import { useToast } from '@/components/ui/Toast';
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from '@/components/ui/ContextMenu';
 import { FilterTabs } from '@/components/FilterTabs';
 import { cn } from '@/lib/cn';
+import { formatDate } from '@/lib/date-utils';
+import { ArchiveIcon } from '@/components/icons/ArchiveIcon';
 import { apiPost } from '@/lib/api';
 import { useQueryClient } from '@tanstack/react-query';
 import { issueKeys } from '@/hooks/useIssuesQuery';
 import { projectKeys } from '@/hooks/useProjectsQuery';
+import { ConversionDialog } from '@/components/dialogs/ConversionDialog';
 
 // All available columns with metadata
 const ALL_COLUMNS: ColumnDefinition[] = [
@@ -26,6 +29,7 @@ const ALL_COLUMNS: ColumnDefinition[] = [
   { key: 'ease', label: 'E', hideable: true },
   { key: 'score', label: 'Score', hideable: true },
   { key: 'program', label: 'Program', hideable: true },
+  { key: 'designReview', label: 'Design Review', hideable: true },
   { key: 'owner', label: 'Owner', hideable: true },
   { key: 'updated', label: 'Updated', hideable: true },
 ];
@@ -177,7 +181,7 @@ export function ProjectsPage() {
     // Create project without owner (unassigned) - owner can be set later
     const project = await createProject({});
     if (project) {
-      navigate(`/projects/${project.id}`);
+      navigate(`/documents/${project.id}`);
     }
   }, [createProject, navigate, user, showToast]);
 
@@ -274,7 +278,7 @@ export function ProjectsPage() {
           queryClient.invalidateQueries({ queryKey: projectKeys.lists() }),
         ]);
         showToast(`Project converted to issue: ${convertingProject.title}`, 'success');
-        navigate(`/issues/${data.id}`, { replace: true });
+        navigate(`/documents/${data.id}`, { replace: true });
       } else {
         const error = await res.json();
         showToast(error.error || 'Failed to convert project to issue', 'error');
@@ -331,7 +335,7 @@ export function ProjectsPage() {
       <p className="text-muted">No projects yet</p>
       <button
         onClick={handleCreateProject}
-        className="mt-2 text-sm text-accent hover:underline"
+        className="mt-2 text-sm text-accent-bright hover:underline"
       >
         Create your first project
       </button>
@@ -404,13 +408,13 @@ export function ProjectsPage() {
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto pb-20">
         <SelectableList
           items={projects}
           renderRow={renderProjectRow}
           columns={columns}
           emptyState={emptyState}
-          onItemClick={(project) => navigate(`/projects/${project.id}`)}
+          onItemClick={(project) => navigate(`/documents/${project.id}`)}
           onSelectionChange={handleSelectionChange}
           onContextMenu={handleContextMenu}
           ariaLabel="Projects list"
@@ -459,96 +463,6 @@ export function ProjectsPage() {
           isConverting={isConverting}
         />
       )}
-    </div>
-  );
-}
-
-// Conversion dialog for converting projects to issues
-interface ConversionDialogProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onConvert: () => void;
-  sourceType: 'issue' | 'project';
-  title: string;
-  isConverting?: boolean;
-}
-
-function ConversionDialog({ isOpen, onClose, onConvert, sourceType, title, isConverting }: ConversionDialogProps) {
-  // Handle Escape key
-  useEffect(() => {
-    if (!isOpen || isConverting) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onClose();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, isConverting, onClose]);
-
-  if (!isOpen) return null;
-
-  const targetType = sourceType === 'issue' ? 'project' : 'issue';
-  const actionLabel = sourceType === 'issue' ? 'Promote to Project' : 'Convert to Issue';
-
-  // Handle click outside dialog
-  const handleBackdropClick = (e: React.MouseEvent) => {
-    if (e.target === e.currentTarget && !isConverting) {
-      onClose();
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" role="dialog" aria-modal="true" onClick={handleBackdropClick}>
-      <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-lg">
-        <h2 className="mb-4 text-lg font-semibold text-foreground">{actionLabel}</h2>
-        <p className="mb-4 text-sm text-foreground">
-          Convert <strong>"{title}"</strong> from {sourceType} to {targetType}?
-        </p>
-        <div className="mb-4 rounded bg-amber-500/10 border border-amber-500/30 p-3">
-          <p className="text-sm text-amber-300 font-medium mb-2">What will happen:</p>
-          <ul className="text-xs text-muted space-y-1">
-            <li>• A new {targetType} will be created with the same title and content</li>
-            <li>• The original {sourceType} will be archived</li>
-            <li>• Links to the old {sourceType} will redirect to the new {targetType}</li>
-            {sourceType === 'issue' && (
-              <li>• Issue properties (state, priority, assignee) will be reset</li>
-            )}
-            {sourceType === 'project' && (
-              <>
-                <li>• Project properties (ICE scores, owner) will be reset</li>
-                <li>• Child issues will be orphaned (unlinked from project)</li>
-              </>
-            )}
-          </ul>
-        </div>
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onClose}
-            disabled={isConverting}
-            className="rounded px-3 py-1.5 text-sm text-muted hover:text-foreground transition-colors disabled:opacity-50"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={onConvert}
-            disabled={isConverting}
-            className="rounded bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-50 transition-colors flex items-center gap-2"
-          >
-            {isConverting ? (
-              <>
-                <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                </svg>
-                Converting...
-              </>
-            ) : (
-              actionLabel
-            )}
-          </button>
-        </div>
-      </div>
     </div>
   );
 }
@@ -608,7 +522,7 @@ function ProjectRowContent({ project, visibleColumns, programNameById }: Project
       {/* ICE Score */}
       {visibleColumns.has('score') && (
         <td className="px-4 py-3 text-sm text-center font-medium" role="gridcell">
-          <span className="inline-flex items-center justify-center rounded bg-accent/20 px-2 py-0.5 text-accent whitespace-nowrap">
+          <span className="inline-flex items-center justify-center rounded bg-accent/20 px-2 py-0.5 text-accent-bright whitespace-nowrap">
             {project.ice_score}
           </span>
         </td>
@@ -617,6 +531,22 @@ function ProjectRowContent({ project, visibleColumns, programNameById }: Project
       {visibleColumns.has('program') && (
         <td className="px-4 py-3 text-sm text-muted" role="gridcell">
           {project.program_id ? programNameById.get(project.program_id) || '—' : '—'}
+        </td>
+      )}
+      {/* Design Review */}
+      {visibleColumns.has('designReview') && (
+        <td className="px-4 py-3 text-sm" role="gridcell">
+          {project.has_design_review ? (
+            <span className="inline-flex items-center gap-1.5 text-green-500">
+              <CheckIcon className="h-4 w-4" />
+              <span className="font-medium">Approved</span>
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-muted">
+              <XCircleIcon className="h-4 w-4" />
+              <span>Not Approved</span>
+            </span>
+          )}
         </td>
       )}
       {/* Owner */}
@@ -640,11 +570,11 @@ function ICEBadge({ value }: { value: number | null }) {
     return <span className="font-medium text-muted">&mdash;</span>;
   }
   const colors = {
-    1: 'text-red-400',
-    2: 'text-orange-400',
-    3: 'text-yellow-400',
-    4: 'text-lime-400',
-    5: 'text-green-400',
+    1: 'text-red-500',
+    2: 'text-orange-500',
+    3: 'text-yellow-500',
+    4: 'text-lime-500',
+    5: 'text-green-500',
   };
   return (
     <span className={cn('font-medium', colors[value as keyof typeof colors] || 'text-muted')}>
@@ -721,30 +651,6 @@ function ProjectsBulkActionBar({
   );
 }
 
-function formatDate(dateString: string): string {
-  const date = new Date(dateString);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMs / 3600000);
-  const diffDays = Math.floor(diffMs / 86400000);
-
-  if (diffMins < 1) return 'Just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-function ArchiveIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-    </svg>
-  );
-}
-
 function TrashIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -765,6 +671,23 @@ function ArrowDownLeftIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 7L7 17M7 17H17M7 17V7" />
+    </svg>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+    </svg>
+  );
+}
+
+function XCircleIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="10" strokeWidth={1.5} />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 9l-6 6M9 9l6 6" />
     </svg>
   );
 }

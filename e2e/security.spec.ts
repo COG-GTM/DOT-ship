@@ -28,13 +28,13 @@ async function createNewDocument(page: Page) {
   await newDocButton.click()
 
   await page.waitForFunction(
-    (oldUrl) => window.location.href !== oldUrl && /\/docs\/[a-f0-9-]+/.test(window.location.href),
+    (oldUrl) => window.location.href !== oldUrl && /\/documents\/[a-f0-9-]+/.test(window.location.href),
     currentUrl,
     { timeout: 10000 }
   )
 
   await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-  await expect(page.locator('input[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('textarea[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 })
 }
 
 // Helper to login
@@ -79,7 +79,7 @@ test.describe('Security - XSS Prevention', () => {
   test('XSS in document titles is escaped', async ({ page }) => {
     await createNewDocument(page)
 
-    const titleInput = page.locator('input[placeholder="Untitled"]')
+    const titleInput = page.locator('textarea[placeholder="Untitled"]')
     await titleInput.click()
 
     // Try to inject XSS in title
@@ -238,6 +238,7 @@ test.describe('Security - XSS Prevention', () => {
   })
 })
 
+// FIXME: File upload via slash command UI has changed
 test.describe('Security - File Upload Validation', () => {
   test.beforeEach(async ({ page }) => {
     await login(page)

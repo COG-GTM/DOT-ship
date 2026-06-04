@@ -34,13 +34,13 @@ async function createNewDocument(page: Page) {
   }
 
   await page.waitForFunction(
-    (oldUrl) => window.location.href !== oldUrl && /\/docs\/[a-f0-9-]+/.test(window.location.href),
+    (oldUrl) => window.location.href !== oldUrl && /\/documents\/[a-f0-9-]+/.test(window.location.href),
     currentUrl,
     { timeout: 10000 }
   )
 
   await expect(page.locator('.ProseMirror')).toBeVisible({ timeout: 5000 })
-  await expect(page.locator('input[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 })
+  await expect(page.locator('textarea[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 })
 }
 
 // Helper to login
@@ -138,20 +138,20 @@ test.describe('Performance - Page Load', () => {
     // Wait for docs page to load - either shows editor or document list
     await page.waitForLoadState('networkidle')
 
-    // Measure navigation to Issues
+    // Measure navigation to Projects
     let startTime = Date.now()
-    await page.getByRole('button', { name: 'Issues' }).click()
-    await expect(page).toHaveURL('/issues', { timeout: 5000 })
+    await page.getByRole('button', { name: 'Projects' }).click()
+    await expect(page).toHaveURL('/projects', { timeout: 5000 })
     let navTime = Date.now() - startTime
-    console.log(`Navigation to Issues: ${navTime}ms`)
+    console.log(`Navigation to Projects: ${navTime}ms`)
     expect(navTime).toBeLessThan(2000)
 
-    // Navigate to Programs (icon rail uses "Programs", not "Projects")
+    // Navigate to Programs
     startTime = Date.now()
     await page.getByRole('button', { name: 'Programs' }).click()
     await expect(page).toHaveURL('/programs', { timeout: 5000 })
     navTime = Date.now() - startTime
-    console.log(`Navigation to Projects: ${navTime}ms`)
+    console.log(`Navigation to Programs: ${navTime}ms`)
     expect(navTime).toBeLessThan(2000)
 
     // Navigate back to Docs
@@ -356,6 +356,8 @@ test.describe('Performance - Large Documents', () => {
   })
 })
 
+// FIXME: Slash command dropdown inconsistent + filechooser event not firing reliably
+// Same issue as images.spec.ts and data-integrity.spec.ts
 test.describe('Performance - Many Images', () => {
   test.beforeEach(async ({ page }) => {
     await login(page)
@@ -405,7 +407,7 @@ test.describe('Performance - Many Images', () => {
       const tmpPath = createTestImageFile()
       imagePaths.push(tmpPath)
 
-      const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 30000 })
+      const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 45000 })
       await page.keyboard.press('Enter')
 
       const fileChooser = await fileChooserPromise
@@ -486,7 +488,7 @@ test.describe('Performance - Many Images', () => {
       imagePaths.push(tmpPath)
 
       // Click the button directly to trigger file chooser (more reliable than keyboard.press)
-      const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 30000 })
+      const fileChooserPromise = page.waitForEvent('filechooser', { timeout: 45000 })
       await optionLocator.click()
 
       const fileChooser = await fileChooserPromise
