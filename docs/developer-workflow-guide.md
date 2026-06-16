@@ -1,6 +1,6 @@
 # Developer Workflow Guide
 
-This guide documents the end-to-end developer workflow in Ship, from receiving an issue to sprint completion. It serves as both documentation of the current state and a training tutorial.
+This guide documents the end-to-end developer workflow in Ship, from receiving an issue to week completion. It serves as both documentation of the current state and a training tutorial.
 
 > **Last Updated:** 2025-12-30
 > **Current UX Rating:** 2.5/10 (see [Baseline Evaluation](#baseline-evaluation))
@@ -9,19 +9,19 @@ This guide documents the end-to-end developer workflow in Ship, from receiving a
 
 ## Overview
 
-Ship follows a document-first approach where everything (issues, sprints, programs, wikis) is a document. The developer workflow centers around:
+Ship follows a document-first approach where everything (issues, weeks, programs, wikis) is a document. The developer workflow centers around:
 
-1. **Programs** - Collections of issues and sprints (like "Ship Core", "API Platform")
+1. **Programs** - Collections of issues and weeks (like "Ship Core", "API Platform")
 2. **Issues** - Work items with state, priority, and assignee
-3. **Sprints** - Time-boxed iterations with goals and backlog planning
-4. **Documents** - Wiki pages, sprint plans, and retrospectives
+3. **Weeks** - Time-boxed iterations with goals and backlog planning
+4. **Documents** - Wiki pages, weekly plans, and retrospectives
 
 ---
 
 ## Workflow 1: Issue Triage & Assignment
 
 ### Goal
-See incoming issues across programs and assign them to a sprint in <3 clicks.
+See incoming issues across programs and triage them in <3 clicks.
 
 ### Current Path
 
@@ -33,87 +33,61 @@ See incoming issues across programs and assign them to a sprint in <3 clicks.
    - Issues page shows all issues filtered by state
    - Default view shows all states
 
-3. **Assign to Sprint**
+3. **Associate with Week** (if needed)
    - Click an issue to open the issue editor
-   - In the Properties sidebar (right side), find "Sprint" dropdown
-   - Select a sprint from the dropdown
-   - Issue is now assigned to that sprint
+   - In the Properties sidebar (right side), use "belongs_to" to associate with a week
+   - Week associations use the `document_associations` table
 
 ### Known Issues
-- [ ] **BUG**: Sprint assignment dropdown may not work (API field mismatch)
-- [ ] No bulk assignment capability yet
-- [ ] No drag-and-drop from issues list to sprint
+- [ ] No bulk association capability yet
+- [ ] No drag-and-drop from issues list to week
 
 ---
 
-## Workflow 2: Sprint Planning
+## Workflow 2: Weekly Planning (Plan-Driven)
 
 ### Goal
-Create a sprint with clear goals and plan which issues to include.
+Write a weekly plan that declares intent, then track execution through issues.
 
 ### Current Path
 
-1. **Navigate to a Program**
-   - Click "Programs" in the left icon rail
-   - Click a program name in the sidebar (e.g., "Ship Core")
+1. **Navigate to "My Work"**
+   - The dashboard answers "what do I need to do right now?"
+   - It surfaces accountability rituals: write your plan, write your retro
+   - When rituals are done, it shows current project context from your weekly plan
 
-2. **View Program's Sprints**
-   - In Program view, click "Sprints" tab *(currently broken)*
-   - **Workaround**: Navigate directly to `/programs/{id}/view` and use Sprints tab
+2. **Write a Weekly Plan**
+   - Plans are the unit of intent -- they declare what you will accomplish this week
+   - Create a weekly plan document for your week
+   - Describe goals, hypothesis, and key deliverables
 
-3. **Create New Sprint**
-   - Click "New Sprint" button
-   - Fill in: Name, Start Date, End Date, Goal
-   - Click "Create Sprint"
-
-4. **Sprint Planning View**
-   - Navigate to `/sprints/{id}/view` to see the planning board
-   - **Left column**: Backlog (program issues not in any sprint)
-   - **Right column**: Sprint (issues assigned to this sprint)
-
-5. **Add Issues to Sprint**
-   - Click the green "+" button on any backlog issue
-   - Issue moves from Backlog to Sprint column
-   - *(Currently broken - see bugs)*
-
-6. **Set Sprint Goal**
-   - Click "Click to add a sprint goal..." text
-   - Type your goal (hypothesis for the sprint)
-   - Click "Save"
-   - *(Currently broken - API doesn't accept goal field)*
+3. **Associate Issues as Needed**
+   - Issues are a trailing indicator (what was done), not a leading indicator (what to do)
+   - Associate issues with weeks via the `document_associations` table as work progresses
 
 ### Known Issues
-- [ ] **BUG**: Tab switching doesn't work in Program view
-- [ ] **BUG**: "+" button returns 400 error (wrong field name)
-- [ ] **BUG**: Sprint goal save returns 400 error (field not in schema)
 - [ ] No drag-and-drop for planning
 
 ---
 
-## Workflow 3: Sprint Execution
+## Workflow 3: Week Execution
 
 ### Goal
 Track issues through states with visual clarity and see progress at a glance.
 
 ### Current Path
 
-1. **Start the Sprint**
-   - From sprint view (`/sprints/{id}/view`)
-   - Click "Start Sprint" button (changes status from Planned to Active)
-   - Sprint is now active
+1. **Week is Active**
+   - Week status is computed from dates (no manual start/complete needed)
+   - When `today` falls within the week's date range, it's active
 
 2. **Work on Issues**
-   - Click an issue in the Sprint column to open it
-   - Update state via the Properties sidebar: backlog → todo → in_progress → done
+   - Open issues and update state via the Properties sidebar: backlog -> todo -> in_progress -> done
    - Add notes, comments, or updates in the document area
 
 3. **Track Progress**
-   - Sprint view shows progress bar: "X% complete (Y/Z)"
+   - Week view shows progress bar: "X% complete (Y/Z)"
    - Progress updates automatically as issues move to "done" state
-
-4. **Complete Sprint**
-   - When work is done, click "Complete Sprint" button
-   - Sprint status changes to Completed
 
 ### Issue States
 
@@ -126,53 +100,52 @@ Track issues through states with visual clarity and see progress at a glance.
 | cancelled | Won't do | Red dot |
 
 ### Known Issues
-- [ ] Issues can't be moved to sprint (API bug)
 - [ ] No keyboard shortcuts for state changes
 - [ ] No board view (only list view exists)
 
 ---
 
-## Workflow 4: Sprint Retrospective
+## Workflow 4: Weekly Retrospective
 
 ### Goal
-Write a retro document capturing learnings after sprint ends.
+Write a retro document capturing learnings after week ends.
 
 ### Current Path
 
 **NOT YET IMPLEMENTED**
 
 The intended workflow:
-1. After completing a sprint, click "Write Retrospective"
-2. Create a document linked to the sprint with type `sprint_retro`
+1. After completing a week, click "Write Retrospective"
+2. Create a document linked to the week with type `weekly_retro`
 3. Template includes: What went well, What didn't, Action items
-4. Retro is discoverable from the sprint view
+4. Retro is discoverable from the week view
 
 ### Known Issues
-- [ ] **MISSING**: `sprint_retro` document type doesn't exist
-- [ ] **MISSING**: No UI to create retro from sprint
+- [ ] **MISSING**: `weekly_retro` document type doesn't exist
+- [ ] **MISSING**: No UI to create retro from week
 - [ ] **MISSING**: No template for retrospective format
 
 ---
 
-## Workflow 5: Sprint Plan Document
+## Workflow 5: Weekly Plan Document
 
 ### Goal
-Write a sprint plan document capturing goals and hypothesis.
+Write a weekly plan document capturing goals and hypothesis.
 
 ### Current Path
 
 **NOT YET IMPLEMENTED**
 
 The intended workflow:
-1. When creating a sprint, click "Write Sprint Plan"
-2. Create a document linked to the sprint with type `sprint_plan`
+1. When creating a week, click "Write Weekly Plan"
+2. Create a document linked to the week with type `weekly_plan`
 3. Document captures: Goals, hypothesis, key deliverables, risks
-4. Plan is visible from sprint view header
+4. Plan is visible from week view header
 
 ### Known Issues
-- [ ] **MISSING**: `sprint_plan` document type doesn't exist
-- [ ] **MISSING**: No UI to create plan from sprint
-- [ ] Sprint has `goal` field but it's just a text field, not a full document
+- [ ] **MISSING**: `weekly_plan` document type doesn't exist
+- [ ] **MISSING**: No UI to create plan from week
+- [ ] Week has `goal` field but it's just a text field, not a full document
 
 ---
 
@@ -185,9 +158,9 @@ The intended workflow:
 | View all issues | Click Issues icon | `Cmd+K` → "issues" |
 | View all programs | Click Programs icon | `Cmd+K` → "programs" |
 | Open specific program | Sidebar → Program name | `Cmd+K` → program name |
-| View sprint | URL: `/sprints/{id}/view` | Click sprint card |
+| View week | URL: `/weeks/{id}/view` | Click week card |
 | Create issue | Issues page → New Issue | `Cmd+K` → "new issue" |
-| Create sprint | Program → Sprints → New | `Cmd+K` → "new sprint" |
+| Create week | Program -> Weeks -> New | `Cmd+K` -> "new week" |
 
 ### Keyboard Shortcuts (Planned)
 
@@ -199,7 +172,7 @@ The intended workflow:
 | `1-4` | Set issue state (todo/in_progress/done/cancelled) |
 | `P` | Set priority |
 | `A` | Assign to user |
-| `S` | Assign to sprint |
+| `S` | Associate with week |
 
 ---
 
@@ -211,17 +184,17 @@ The intended workflow:
 | Area | Score | Notes |
 |------|-------|-------|
 | Issue Triage | 0.5/2 | UI exists but API broken |
-| Sprint Goals | 0.5/2 | Can edit but can't save |
-| Sprint Execution | 1.0/2 | Display works, interaction broken |
-| Sprint Retro | 0.0/2 | Feature doesn't exist |
+| Week Goals | 0.5/2 | Can edit but can't save |
+| Week Execution | 1.0/2 | Display works, interaction broken |
+| Weekly Retro | 0.0/2 | Feature doesn't exist |
 | Overall Polish | 0.5/2 | Visual good, full of bugs |
 
 ### Bugs Blocking Basic Workflow
 
-1. **Tab switching** - Can't switch between Issues/Sprints tabs in Program view
-2. **Issue-to-sprint** - "+" button fails with 400 error
-3. **Sprint goal save** - Save button fails with 400 error
-4. **Missing features** - No sprint_plan or sprint_retro document types
+1. **Tab switching** - Can't switch between Issues/Weeks tabs in Program view
+2. **Issue-to-week** - "+" button fails with 400 error
+3. **Week goal save** - Save button fails with 400 error
+4. **Missing features** - No weekly_plan or weekly_retro document types
 
 ---
 
@@ -232,13 +205,13 @@ Use AI-assisted development workflows with real-time Ship visibility.
 
 ### Overview
 
-Ship integrates with Claude Code CLI for automated sprint planning and execution. See [Ship + Claude CLI Integration Guide](./ship-claude-cli-integration.md) for complete documentation.
+Ship integrates with Claude Code CLI for automated week planning and execution. See [Ship + Claude CLI Integration Guide](./ship-claude-cli-integration.md) for complete documentation.
 
 ### Key Commands
 
 | Command | Description | Ship Integration |
 |---------|-------------|------------------|
-| `/prd` | Generate PRD with user stories | Creates sprint + issues in Ship |
+| `/prd` | Generate PRD with user stories | Creates week + issues in Ship |
 | `/work` | Execute PRD stories | Updates issue states in real-time |
 | `/standup` | Daily progress summary | Pulls data from Ship |
 | `/document` | Capture learnings | Creates wiki docs in Ship |
@@ -251,14 +224,14 @@ Ship integrates with Claude Code CLI for automated sprint planning and execution
    SHIP_API_TOKEN=ship_<your_token>
    SHIP_API_URL=https://your-ship-instance.example.com/api
    ```
-3. Run `/prd` to create a linked sprint
+3. Run `/prd` to create a linked week
 
 ### Observable Outcomes
 
 While `/work` runs:
 - Issue states transition: `todo` → `in_progress` → `done`
-- Sprint progress percentage updates live
-- Iteration attempts logged to sprint history
+- Week progress percentage updates live
+- Iteration attempts logged to week history
 - Verification failures recorded with context
 
 ---
@@ -268,11 +241,11 @@ While `/work` runs:
 Once bugs are fixed, the following improvements are planned:
 
 1. **Cmd+K Command Palette** - Quick access to any action
-2. **Drag-and-Drop Planning** - Move issues between backlog/sprint by dragging
-3. **Sprint Documentation** - Full documents for plans and retros
+2. **Drag-and-Drop Planning** - Move issues between backlog/week by dragging
+3. **Week Documentation** - Full documents for plans and retros
 4. **Keyboard-First UX** - All actions available via keyboard
-5. **Auto-Archive** - Move incomplete issues to backlog when sprint ends
-6. **Board View** - Kanban-style view for sprint execution
+5. **Auto-Archive** - Move incomplete issues to backlog when week ends
+6. **Board View** - Kanban-style view for week execution
 
 ---
 
@@ -282,9 +255,9 @@ Once bugs are fixed, the following improvements are planned:
 |-------------|------|
 | `/programs` | Programs list |
 | `/programs/{id}` | Program editor |
-| `/programs/{id}/view` | Program view (tabs: Issues, Sprints, Settings) |
-| `/sprints/{id}` | Sprint editor (document) |
-| `/sprints/{id}/view` | Sprint planning view (backlog/sprint columns) |
+| `/programs/{id}/view` | Program view (tabs: Issues, Weeks, Settings) |
+| `/weeks/{id}` | Week editor (document) |
+| `/weeks/{id}/view` | Week planning view (backlog/week columns) |
 | `/issues` | Issues list |
 | `/issues/{id}` | Issue editor |
 | `/docs` | Wiki documents list |

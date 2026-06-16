@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { cn } from '@/lib/cn';
+import { ArchiveIcon } from '@/components/icons/ArchiveIcon';
 
 interface Sprint {
   id: string;
@@ -9,6 +10,11 @@ interface Sprint {
 interface TeamMember {
   id: string;
   name: string;
+}
+
+interface Project {
+  id: string;
+  title: string;
 }
 
 export interface BulkActionBarProps {
@@ -26,10 +32,14 @@ export interface BulkActionBarProps {
   onMoveToSprint: (sprintId: string | null) => void;
   /** Callback to assign selected items to a team member */
   onAssign?: (assigneeId: string | null) => void;
+  /** Callback to assign selected items to a project */
+  onAssignProject?: (projectId: string | null) => void;
   /** Available sprints for the dropdown */
   sprints?: Sprint[];
   /** Available team members for the dropdown */
   teamMembers?: TeamMember[];
+  /** Available projects for the dropdown */
+  projects?: Project[];
   /** Whether actions are loading */
   loading?: boolean;
 }
@@ -61,16 +71,20 @@ export function BulkActionBar({
   onChangeStatus,
   onMoveToSprint,
   onAssign,
+  onAssignProject,
   sprints = [],
   teamMembers = [],
+  projects = [],
   loading = false,
 }: BulkActionBarProps) {
   const [statusOpen, setStatusOpen] = useState(false);
   const [sprintOpen, setSprintOpen] = useState(false);
   const [assigneeOpen, setAssigneeOpen] = useState(false);
+  const [projectOpen, setProjectOpen] = useState(false);
   const statusRef = useRef<HTMLDivElement>(null);
   const sprintRef = useRef<HTMLDivElement>(null);
   const assigneeRef = useRef<HTMLDivElement>(null);
+  const projectRef = useRef<HTMLDivElement>(null);
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -84,6 +98,9 @@ export function BulkActionBar({
       if (assigneeRef.current && !assigneeRef.current.contains(e.target as Node)) {
         setAssigneeOpen(false);
       }
+      if (projectRef.current && !projectRef.current.contains(e.target as Node)) {
+        setProjectOpen(false);
+      }
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -96,6 +113,7 @@ export function BulkActionBar({
         setStatusOpen(false);
         setSprintOpen(false);
         setAssigneeOpen(false);
+        setProjectOpen(false);
       }
     }
     document.addEventListener('keydown', handleKeyDown);
@@ -116,6 +134,11 @@ export function BulkActionBar({
     onAssign?.(assigneeId);
     setAssigneeOpen(false);
   }, [onAssign]);
+
+  const handleProjectSelect = useCallback((projectId: string | null) => {
+    onAssignProject?.(projectId);
+    setProjectOpen(false);
+  }, [onAssignProject]);
 
   if (selectedCount === 0) {
     return null;
@@ -149,7 +172,7 @@ export function BulkActionBar({
       {/* Change Status dropdown */}
       <div className="relative" ref={statusRef}>
         <ActionButton
-          onClick={() => { setSprintOpen(false); setAssigneeOpen(false); setStatusOpen(!statusOpen); }}
+          onClick={() => { setSprintOpen(false); setAssigneeOpen(false); setProjectOpen(false); setStatusOpen(!statusOpen); }}
           disabled={loading}
           icon={<StatusIcon />}
           label="Change Status"
@@ -170,20 +193,20 @@ export function BulkActionBar({
         )}
       </div>
 
-      {/* Move to Sprint dropdown */}
+      {/* Move to Week dropdown */}
       <div className="relative" ref={sprintRef}>
         <ActionButton
-          onClick={() => { setStatusOpen(false); setAssigneeOpen(false); setSprintOpen(!sprintOpen); }}
+          onClick={() => { setStatusOpen(false); setAssigneeOpen(false); setProjectOpen(false); setSprintOpen(!sprintOpen); }}
           disabled={loading}
           icon={<SprintIcon />}
-          label="Move to Sprint"
+          label="Move to Week"
           hasDropdown
           isOpen={sprintOpen}
         />
         {sprintOpen && (
           <DropdownMenu>
             <DropdownItem onClick={() => handleSprintSelect(null)}>
-              No Sprint
+              No Week
             </DropdownItem>
             {sprints.length > 0 && (
               <div className="my-1 h-px bg-border" />
@@ -198,7 +221,7 @@ export function BulkActionBar({
             ))}
             {sprints.length === 0 && (
               <div className="px-3 py-2 text-xs text-muted">
-                No sprints available
+                No weeks available
               </div>
             )}
           </DropdownMenu>
@@ -209,7 +232,7 @@ export function BulkActionBar({
       {onAssign && (
         <div className="relative" ref={assigneeRef}>
           <ActionButton
-            onClick={() => { setStatusOpen(false); setSprintOpen(false); setAssigneeOpen(!assigneeOpen); }}
+            onClick={() => { setStatusOpen(false); setSprintOpen(false); setProjectOpen(false); setAssigneeOpen(!assigneeOpen); }}
             disabled={loading}
             icon={<PersonIcon />}
             label="Assign"
@@ -235,6 +258,43 @@ export function BulkActionBar({
               {teamMembers.length === 0 && (
                 <div className="px-3 py-2 text-xs text-muted">
                   No team members available
+                </div>
+              )}
+            </DropdownMenu>
+          )}
+        </div>
+      )}
+
+      {/* Project dropdown */}
+      {onAssignProject && (
+        <div className="relative" ref={projectRef}>
+          <ActionButton
+            onClick={() => { setStatusOpen(false); setSprintOpen(false); setAssigneeOpen(false); setProjectOpen(!projectOpen); }}
+            disabled={loading}
+            icon={<FolderIcon />}
+            label="Project"
+            hasDropdown
+            isOpen={projectOpen}
+          />
+          {projectOpen && (
+            <DropdownMenu>
+              <DropdownItem onClick={() => handleProjectSelect(null)}>
+                No Project
+              </DropdownItem>
+              {projects.length > 0 && (
+                <div className="my-1 h-px bg-border" />
+              )}
+              {projects.map((project) => (
+                <DropdownItem
+                  key={project.id}
+                  onClick={() => handleProjectSelect(project.id)}
+                >
+                  {project.title}
+                </DropdownItem>
+              ))}
+              {projects.length === 0 && (
+                <div className="px-3 py-2 text-xs text-muted">
+                  No projects available
                 </div>
               )}
             </DropdownMenu>
@@ -343,14 +403,6 @@ function DropdownItem({
 }
 
 // Icons
-function ArchiveIcon() {
-  return (
-    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" />
-    </svg>
-  );
-}
-
 function StatusIcon() {
   return (
     <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -371,6 +423,14 @@ function PersonIcon() {
   return (
     <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+    </svg>
+  );
+}
+
+function FolderIcon() {
+  return (
+    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
     </svg>
   );
 }

@@ -10,6 +10,9 @@
   },
   "scripts": {
     "dev": "./scripts/dev.sh",
+    "docker:up": "docker compose -f docker-compose.local.yml up --build",
+    "docker:down": "docker compose -f docker-compose.local.yml down",
+    "docker:clean": "docker compose -f docker-compose.local.yml down -v",
     "dev:raw": "pnpm --parallel --recursive run dev",
     "dev:api": "pnpm --filter @ship/api dev",
     "dev:web": "pnpm --filter @ship/web dev",
@@ -27,6 +30,7 @@
     "worktree:init": "./scripts/worktree-init.sh",
     "db:seed": "pnpm --filter @ship/api db:seed",
     "db:migrate": "pnpm --filter @ship/api db:migrate",
+    "db:orphan-check": "pnpm --filter @ship/api db:orphan-check",
     "prepare": "husky",
     "postinstall": "git config merge.ours.driver true && (command -v comply >/dev/null 2>&1 || echo '\\n⚠️  comply CLI not installed - pre-commit hooks require it\\n   Install with: pip install comply-cli\\n')"
   },
@@ -39,6 +43,7 @@
     "get-port": "^7.1.0",
     "husky": "^9.1.7",
     "prettier": "^3.4.2",
+    "puppeteer-core": "^25.0.4",
     "supertest": "^7.1.4",
     "testcontainers": "^11.11.0",
     "typescript": "^5.7.2",

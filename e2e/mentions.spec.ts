@@ -21,9 +21,9 @@ async function createNewDocument(page: Page) {
     await mainButton.click();
   }
 
-  // Wait for URL to change to a new document
+  // Wait for URL to change to a new document - unified document routing
   await page.waitForFunction(
-    (oldUrl) => window.location.href !== oldUrl && /\/docs\/[a-f0-9-]+/.test(window.location.href),
+    (oldUrl) => window.location.href !== oldUrl && /\/documents\/[a-f0-9-]+/.test(window.location.href),
     currentUrl,
     { timeout: 10000 }
   );
@@ -33,7 +33,7 @@ async function createNewDocument(page: Page) {
 
   // Verify this is a NEW document (title should be "Untitled")
   // The title input has placeholder="Untitled" and should be empty or show "Untitled"
-  await expect(page.locator('input[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 });
+  await expect(page.locator('textarea[placeholder="Untitled"]')).toBeVisible({ timeout: 3000 });
 }
 
 test.describe('Mentions', () => {
@@ -409,11 +409,12 @@ test.describe('Mentions', () => {
       // Navigate to same document
       await page2.goto(docUrl);
 
-      // Wait for editor to load
+      // Wait for editor to load and Yjs sync to complete
       await expect(page2.locator('.ProseMirror')).toBeVisible({ timeout: 5000 });
+      await page2.waitForTimeout(3000);
 
-      // Verify mention synced to second tab
-      await expect(page2.locator('.ProseMirror .mention')).toBeVisible({ timeout: 10000 });
+      // Verify mention synced to second tab (Yjs sync can be slow)
+      await expect(page2.locator('.ProseMirror .mention')).toBeVisible({ timeout: 15000 });
 
       // Clean up
       await page2.close();

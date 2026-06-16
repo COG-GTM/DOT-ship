@@ -11,7 +11,7 @@ import issuesRoutes from './routes/issues.js';
 import feedbackRoutes, { publicFeedbackRouter } from './routes/feedback.js';
 import programsRoutes from './routes/programs.js';
 import projectsRoutes from './routes/projects.js';
-import sprintsRoutes from './routes/sprints.js';
+import weeksRoutes from './routes/weeks.js';
 import standupsRoutes from './routes/standups.js';
 import iterationsRoutes from './routes/iterations.js';
 import teamRoutes from './routes/team.js';
@@ -28,8 +28,14 @@ import adminCredentialsRoutes from './routes/admin-credentials.js';
 import claudeRoutes from './routes/claude.js';
 import activityRoutes from './routes/activity.js';
 import dashboardRoutes from './routes/dashboard.js';
+import associationsRoutes from './routes/associations.js';
+import accountabilityRoutes from './routes/accountability.js';
+import aiRoutes from './routes/ai.js';
+import weeklyPlansRoutes, { weeklyRetrosRouter } from './routes/weekly-plans.js';
+import { documentCommentsRouter, commentsRouter } from './routes/comments.js';
 import { setupSwagger } from './swagger.js';
 import { initializeCAIA } from './services/caia.js';
+import { ERROR_CODES, HTTP_STATUS } from '@ship/shared';
 
 // Validate SESSION_SECRET in production
 if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) {
@@ -56,9 +62,13 @@ const conditionalCsrf = (req: Request, res: Response, next: NextFunction) => {
 };
 
 // Rate limiting configurations
-// In test environment, use much higher limits to avoid flaky tests
+// In test/dev environment, use much higher limits to avoid issues
 // Production limits: login=5/15min (failed only), api=100/min
 const isTestEnv = process.env.NODE_ENV === 'test' || process.env.E2E_TEST === '1';
+const isDevEnv = process.env.NODE_ENV !== 'production';
+// shipshape audit only: SHIPSHAPE_AUDIT=1 disables rate limiting for honest perf measurements.
+// This flag is NEVER committed in a production-meaningful way — see audit-revert step.
+const isAuditMode = process.env.SHIPSHAPE_AUDIT === '1';
 
 // Strict rate limit for login (5 failed attempts / 15 min) - brute force protection
 // skipSuccessfulRequests: true means only failed attempts count toward the limit
@@ -71,10 +81,10 @@ const loginLimiter = rateLimit({
   skipSuccessfulRequests: true, // Only count failed login attempts
 });
 
-// General API rate limit (100 req/min)
+// General API rate limit (100 req/min in prod, 1000 in dev)
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: isTestEnv ? 10000 : 100, // High limit for tests
+  max: isAuditMode ? 10_000_000 : isTestEnv ? 10000 : isDevEnv ? 1000 : 100, // High limit for tests/dev
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please slow down.' },
@@ -133,8 +143,8 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
     origin: corsOrigin,
     credentials: true,
   }));
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true })); // For HTML form submissions
+  app.use(express.json({ limit: '10mb' }));  // Large wiki documents can be several MB
+  app.use(express.urlencoded({ extended: true, limit: '10mb' })); // For HTML form submissions
   app.use(cookieParser(sessionSecret));
 
   // Session middleware for CSRF token storage
@@ -176,12 +186,13 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
   app.use('/api/auth', conditionalCsrf, authRoutes);
   app.use('/api/documents', conditionalCsrf, documentsRoutes);
   app.use('/api/documents', conditionalCsrf, backlinksRoutes);
+  app.use('/api/documents', conditionalCsrf, associationsRoutes);
   app.use('/api/issues', conditionalCsrf, issuesRoutes);
   app.use('/api/feedback', conditionalCsrf, feedbackRoutes);
   app.use('/api/programs', conditionalCsrf, programsRoutes);
   app.use('/api/projects', conditionalCsrf, projectsRoutes);
-  app.use('/api/sprints', conditionalCsrf, sprintsRoutes);
-  app.use('/api/sprints', conditionalCsrf, iterationsRoutes);
+  app.use('/api/weeks', conditionalCsrf, weeksRoutes);
+  app.use('/api/weeks', conditionalCsrf, iterationsRoutes);
   app.use('/api/standups', conditionalCsrf, standupsRoutes);
   app.use('/api/team', conditionalCsrf, teamRoutes);
   app.use('/api/workspaces', conditionalCsrf, workspacesRoutes);
@@ -201,6 +212,18 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
   // Dashboard routes are read-only GET endpoints - no CSRF needed
   app.use('/api/dashboard', dashboardRoutes);
 
+  // Accountability routes - inference-based action items (read-only GET)
+  app.use('/api/accountability', accountabilityRoutes);
+
+  // AI analysis routes - plan and retro quality feedback (CSRF protected)
+  app.use('/api/ai', conditionalCsrf, aiRoutes);
+
+  // Weekly plans routes - per-person accountability documents (CSRF protected)
+  app.use('/api/weekly-plans', conditionalCsrf, weeklyPlansRoutes);
+
+  // Weekly retros routes - per-person accountability documents (CSRF protected)
+  app.use('/api/weekly-retros', conditionalCsrf, weeklyRetrosRouter);
+
   // CAIA auth routes - no CSRF protection (OAuth flow with external callback)
   // This is the single identity provider for PIV authentication
   // Mount at both /caia and /piv paths - /piv/callback is registered with CAIA
@@ -212,6 +235,85 @@ export function createApp(corsOrigin: string = 'http://localhost:5173'): express
 
   // File upload routes (CSRF protected for POST endpoints)
   app.use('/api/files', conditionalCsrf, filesRouter);
+
+  // Comments routes
+  app.use('/api/documents', conditionalCsrf, documentCommentsRouter);
+  app.use('/api/comments', conditionalCsrf, commentsRouter);
+
+  // ---------------------------------------------------------------------------
+  // 404 handler — JSON for unmatched /api/* routes.
+  // Must come AFTER all api routes and BEFORE the global error handler.
+  // Non-/api routes fall through; in production the SPA shell handles them,
+  // in dev Vite's proxy handles them (the api process doesn't serve the SPA).
+  // ---------------------------------------------------------------------------
+  app.use('/api', (req: Request, res: Response) => {
+    res.status(HTTP_STATUS.NOT_FOUND).json({
+      success: false,
+      error: { code: ERROR_CODES.NOT_FOUND, message: `No route for ${req.method} ${req.originalUrl}` },
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Global error handler — keep last.
+  //
+  // Replaces Express's default HTML error page, which leaked full Node.js stack
+  // traces to the client on malformed JSON (audit Category 6 finding). Every
+  // unhandled error now returns a sanitized JSON payload matching the
+  // ApiResponse shape from @ship/shared.
+  //
+  // Express requires the 4-arg signature `(err, req, res, next)` to register
+  // this as an error handler.
+  // ---------------------------------------------------------------------------
+  interface AppError extends Error {
+    type?: string;     // body-parser sets e.g. 'entity.parse.failed', 'entity.too.large'
+    status?: number;   // some libraries set HTTP status here
+    statusCode?: number;
+    expose?: boolean;  // http-errors: true => safe to expose message
+  }
+
+  app.use((err: AppError, req: Request, res: Response, next: NextFunction) => {
+    // If headers already streamed, only Express's default close behaviour helps.
+    if (res.headersSent) {
+      return next(err);
+    }
+
+    // Server-side log (full error, including stack — never sent to client).
+    console.error(`[${req.method} ${req.originalUrl}]`, err);
+
+    // body-parser: malformed JSON in request body.
+    if (err.type === 'entity.parse.failed') {
+      res.status(HTTP_STATUS.BAD_REQUEST).json({
+        success: false,
+        error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Request body is not valid JSON' },
+      });
+      return;
+    }
+
+    // body-parser: body exceeded the 10mb limit.
+    if (err.type === 'entity.too.large') {
+      res.status(413).json({
+        success: false,
+        error: { code: ERROR_CODES.VALIDATION_ERROR, message: 'Request body exceeds size limit' },
+      });
+      return;
+    }
+
+    // Generic case. Trust an explicit status on the error if it's in the 4xx range;
+    // collapse everything else to 500 and never leak the message in that case.
+    const explicit = err.status ?? err.statusCode;
+    const status = typeof explicit === 'number' && explicit >= 400 && explicit < 500
+      ? explicit
+      : HTTP_STATUS.INTERNAL_SERVER_ERROR;
+    res.status(status).json({
+      success: false,
+      error: {
+        code: status >= 500 ? ERROR_CODES.INTERNAL_ERROR : ERROR_CODES.VALIDATION_ERROR,
+        message: status >= 500
+          ? 'Internal server error'
+          : (err.expose === false ? 'Bad request' : (err.message || 'Bad request')),
+      },
+    });
+  });
 
   // Initialize CAIA OAuth client at startup
   initializeCAIA().catch((err) => {

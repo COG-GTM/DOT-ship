@@ -31,7 +31,8 @@ test.describe('Status Colors Accessibility', () => {
 
     test('priority indicators use accessible color classes', async ({ page }) => {
       await page.goto('/issues');
-      await page.waitForSelector('[data-testid="issues-list"], .issue-row, [class*="issue"]', { timeout: 10000 });
+      await page.waitForLoadState('networkidle');
+      await page.waitForSelector('[data-testid="issues-list"], .issue-row, [class*="issue"]', { timeout: 15000 });
 
       // Priority indicators should not use -400 variants
       const priorityWithLowContrast = page.locator('[class*="text-red-400"], [class*="text-yellow-400"], [class*="text-blue-400"]').filter({ hasText: /urgent|high|medium|low/i });
@@ -47,7 +48,7 @@ test.describe('Status Colors Accessibility', () => {
       await page.waitForSelector('[data-testid="programs-list"], .program-card, [class*="program"]', { timeout: 10000 });
 
       // Click first program if available
-      const programLink = page.locator('a[href*="/programs/"]').first();
+      const programLink = page.locator('a[href*="/documents/"]').first();
       if (await programLink.count() > 0) {
         await programLink.click();
         await page.waitForTimeout(1000);
@@ -64,7 +65,7 @@ test.describe('Status Colors Accessibility', () => {
       await page.goto('/programs');
       await page.waitForSelector('[data-testid="programs-list"], .program-card, [class*="program"]', { timeout: 10000 });
 
-      const programLink = page.locator('a[href*="/programs/"]').first();
+      const programLink = page.locator('a[href*="/documents/"]').first();
       if (await programLink.count() > 0) {
         await programLink.click();
         await page.waitForTimeout(1000);
@@ -77,7 +78,7 @@ test.describe('Status Colors Accessibility', () => {
     });
   });
 
-  test.describe('Sprint View', () => {
+  test.describe('Week View', () => {
     test('sprint status uses accessible colors', async ({ page }) => {
       // Navigate to sprints via team view or direct
       await page.goto('/team');

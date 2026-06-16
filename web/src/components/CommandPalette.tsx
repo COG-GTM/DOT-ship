@@ -4,7 +4,7 @@ import { Command } from 'cmdk';
 import { cn } from '@/lib/cn';
 import { Tooltip } from '@/components/ui/Tooltip';
 
-const API_URL = import.meta.env.VITE_API_URL ?? '';
+import { apiGet, apiPost } from '@/lib/api';
 
 interface SearchableDocument {
   id: string;
@@ -17,12 +17,21 @@ interface SearchableDocument {
   };
 }
 
+type ConvertibleDocumentType = 'wiki' | 'issue' | 'project' | 'sprint';
+
 interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Current document context for type conversion commands */
+  currentDocument?: {
+    id: string;
+    type: string;
+  };
+  /** Handler for document type conversion */
+  onConvertDocument?: (newType: ConvertibleDocumentType) => void;
 }
 
-export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
+export function CommandPalette({ open, onOpenChange, currentDocument, onConvertDocument }: CommandPaletteProps) {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [documents, setDocuments] = useState<SearchableDocument[]>([]);
@@ -99,24 +108,19 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const createIssue = async () => {
     try {
       // Get the first program to create the issue in
-      const programsRes = await fetch(`${API_URL}/api/programs`, { credentials: 'include' });
+      const programsRes = await apiGet('/api/programs');
       if (!programsRes.ok) return;
       const programs = await programsRes.json();
       if (programs.length === 0) return;
 
-      const res = await fetch(`${API_URL}/api/issues`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          title: 'Untitled',
-          program_id: programs[0].id,
-        }),
+      const res = await apiPost('/api/issues', {
+        title: 'Untitled',
+        program_id: programs[0].id,
       });
 
       if (res.ok) {
         const issue = await res.json();
-        navigate(`/issues/${issue.id}`);
+        navigate(`/documents/${issue.id}`);
       }
     } catch (err) {
       console.error('Failed to create issue:', err);
@@ -125,16 +129,11 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
 
   const createDocument = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/documents`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ title: 'Untitled', document_type: 'wiki' }),
-      });
+      const res = await apiPost('/api/documents', { title: 'Untitled', document_type: 'wiki' });
 
       if (res.ok) {
         const doc = await res.json();
-        navigate(`/docs/${doc.id}`);
+        navigate(`/documents/${doc.id}`);
       }
     } catch (err) {
       console.error('Failed to create document:', err);
@@ -151,9 +150,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     const fetchDocuments = async () => {
       setLoading(true);
       try {
-        const res = await fetch(`${API_URL}/api/documents`, {
-          credentials: 'include',
-        });
+        const res = await apiGet('/api/documents');
         if (res.ok) {
           const data = await res.json();
           setDocuments(data);
@@ -316,9 +313,9 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               </Command.Group>
             )}
 
-            {/* Sprints */}
+            {/* Weeks */}
             {groupedDocuments.sprint.length > 0 && (
-              <Command.Group heading="Sprints" className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted">
+              <Command.Group heading="Weeks" className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted">
                 {groupedDocuments.sprint.map((doc) => (
                   <CommandItem
                     key={doc.id}
@@ -345,6 +342,36 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     <span className="truncate">{doc.title}</span>
                   </CommandItem>
                 ))}
+              </Command.Group>
+            )}
+
+            {/* Convert Actions (only show when viewing a convertible document) */}
+            {currentDocument && onConvertDocument && ['wiki', 'issue', 'project', 'sprint'].includes(currentDocument.type) && (
+              <Command.Group heading="Convert" className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted">
+                {currentDocument.type !== 'wiki' && (
+                  <CommandItem onSelect={() => runCommand(() => onConvertDocument('wiki'))}>
+                    <ConvertIcon />
+                    <span>Convert to Wiki</span>
+                  </CommandItem>
+                )}
+                {currentDocument.type !== 'issue' && (
+                  <CommandItem onSelect={() => runCommand(() => onConvertDocument('issue'))}>
+                    <ConvertIcon />
+                    <span>Convert to Issue</span>
+                  </CommandItem>
+                )}
+                {currentDocument.type !== 'project' && (
+                  <CommandItem onSelect={() => runCommand(() => onConvertDocument('project'))}>
+                    <ConvertIcon />
+                    <span>Convert to Project</span>
+                  </CommandItem>
+                )}
+                {currentDocument.type !== 'sprint' && (
+                  <CommandItem onSelect={() => runCommand(() => onConvertDocument('sprint'))}>
+                    <ConvertIcon />
+                    <span>Convert to Week</span>
+                  </CommandItem>
+                )}
               </Command.Group>
             )}
 
@@ -462,6 +489,14 @@ function PersonIcon() {
   return (
     <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+    </svg>
+  );
+}
+
+function ConvertIcon() {
+  return (
+    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
     </svg>
   );
 }
