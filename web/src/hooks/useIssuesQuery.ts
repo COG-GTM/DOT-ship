@@ -40,7 +40,7 @@ export const issueKeys = {
 
 // Fetch issues
 async function fetchIssues(): Promise<Issue[]> {
-  const res = await apiGet('/api/issues');
+  const res = await apiGet('/api/issues?include_content=false');
   if (!res.ok) {
     const error = new Error('Failed to fetch issues') as Error & { status: number };
     error.status = res.status;

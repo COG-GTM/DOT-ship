@@ -134,6 +134,8 @@ function extractIssueFromRow(row: any) {
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { state, priority, assignee_id, program_id, sprint_id, source } = req.query;
+    // List views don't render issue bodies; ?include_content=false skips loading and sending them
+    const includeContent = req.query.include_content !== 'false';
     const userId = req.userId!;
     const workspaceId = req.workspaceId!;
 
@@ -142,7 +144,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 
     let query = `
       SELECT d.id, d.title, d.properties, d.ticket_number,
-             d.program_id, d.sprint_id, d.content,
+             d.program_id, d.sprint_id,${includeContent ? ' d.content,' : ''}
              d.created_at, d.updated_at, d.created_by,
              d.started_at, d.completed_at, d.cancelled_at, d.reopened_at,
              d.converted_from_id,
@@ -216,7 +218,8 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 
     // Extract and add display_id to each issue
     const issues = result.rows.map(row => {
-      const issue = extractIssueFromRow(row);
+      const issue: Partial<ReturnType<typeof extractIssueFromRow>> = extractIssueFromRow(row);
+      if (!includeContent) delete issue.content;
       return {
         ...issue,
         display_id: `#${issue.ticket_number}`
